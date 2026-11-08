@@ -37,7 +37,9 @@ mod timeline;
 mod widthtool;
 
 use anicraft_engine::Session;
-use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
+use std::path::Path;
 
 /// The session to start with: the file given on the command line (through `file.open`, so
 /// `.fla` / `.xfl` import works the same as from the menu), else the sample. Also the import
@@ -68,6 +70,7 @@ struct Look {
     scale: Option<f32>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run(renderer: eframe::Renderer, file: Option<&Path>, shot: Option<PathBuf>, open: Option<String>, look: Look) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: platform::viewport(egui::ViewportBuilder::default().with_title("AniCraft").with_inner_size([1600.0, 940.0]).with_min_inner_size([960.0, 600.0])),
@@ -94,6 +97,7 @@ fn run(renderer: eframe::Renderer, file: Option<&Path>, shot: Option<PathBuf>, o
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     let mut shot: Option<PathBuf> = None;
     let mut file: Option<PathBuf> = None;
@@ -158,6 +162,32 @@ fn main() -> eframe::Result {
             run(eframe::Renderer::Glow, file.as_deref(), shot, open, look)
         }
         other => other,
+    }
+}
+
+/// Browser entry point: runs the app in the canvas `anicraft_canvas` of index.html.
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use eframe::wasm_bindgen::JsCast as _;
+    wasm_bindgen_futures::spawn_local(async {
+        let canvas = web_sys_canvas();
+        let Some(canvas) = canvas else { return };
+        let session = open_session(None);
+        let _ = eframe::WebRunner::new()
+            .start(
+                canvas,
+                eframe::WebOptions::default(),
+                Box::new(move |cc| {
+                    let a = app::App::new(cc, session, None);
+                    Ok(Box::new(a))
+                }),
+            )
+            .await;
+    });
+
+    fn web_sys_canvas() -> Option<eframe::web_sys::HtmlCanvasElement> {
+        let doc = eframe::web_sys::window()?.document()?;
+        doc.get_element_by_id("anicraft_canvas")?.dyn_into::<eframe::web_sys::HtmlCanvasElement>().ok()
     }
 }
 

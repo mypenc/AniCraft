@@ -377,7 +377,9 @@ impl App {
         // Text lays out with the fonts on this computer plus the embedded interface font (so new
         // text has the same default everywhere). Scan them now, off the UI thread.
         anicraft_engine::text::Fonts::register(crate::theme::embedded_fonts());
-        std::thread::spawn(|| {
+        // (Builder::spawn, unlike thread::spawn, returns an error instead of panicking where
+        // threads do not exist, as in the browser.)
+        let _ = std::thread::Builder::new().name("anicraft-fonts-init".into()).spawn(|| {
             let _ = anicraft_engine::text::Fonts::get();
         });
         let mut app = App {

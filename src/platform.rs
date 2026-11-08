@@ -173,6 +173,12 @@ pub fn filters(cmd: &str) -> (&'static str, &'static [&'static str]) {
 
 /// Shows the platform's own dialog (Windows common dialog, macOS panel, Linux XDG portal).
 /// `None` when cancelled.
+#[cfg(target_arch = "wasm32")]
+pub fn file_dialog(_cmd: &str, _title: &str, _default_name: &str) -> Option<PathBuf> {
+    None // the browser build has no native file dialogs yet
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn file_dialog(cmd: &str, title: &str, default_name: &str) -> Option<PathBuf> {
     let (label, exts) = filters(cmd);
     let d = rfd::FileDialog::new().set_title(title);

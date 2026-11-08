@@ -51,6 +51,8 @@ rfd = "0.17"
 # (/usr/share/fonts, /usr/local/share/fonts, ~/.local/share/fonts, ~/.fonts).
 fontdb = { version = "0.23", default-features = false, features = ["std", "fs", "memmap"] }
 egui = "0.36"
+# std::time::Instant that also works in the browser (WebAssembly).
+web-time = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -96,6 +98,10 @@ anicraft-audio.workspace = true
 # Sound output (Apache-2.0): WASAPI on Windows, CoreAudio on macOS, ALSA on Linux and the BSDs.
 cpal = { version = "0.18", optional = true }
 serde_json.workspace = true
+web-time.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
 
 [build-dependencies]
 # Embeds the app icon in anicraft.exe on Windows (build.rs); does nothing on other targets.
