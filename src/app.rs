@@ -1468,7 +1468,11 @@ fn app_mark(ctx: &egui::Context) -> egui::TextureHandle {
     if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
         return tex;
     }
+    // (eframe decodes PNGs for icons on desktop only; the browser build shows no mark.)
+    #[cfg(not(target_arch = "wasm32"))]
     let icon = eframe::icon_data::from_png_bytes(PNG).unwrap_or_default();
+    #[cfg(target_arch = "wasm32")]
+    let icon = egui::IconData::default();
     let image = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
     let options = egui::TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..egui::TextureOptions::LINEAR };
     let tex = ctx.load_texture("anicraft-app-mark", image, options);

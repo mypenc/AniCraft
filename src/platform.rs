@@ -131,7 +131,15 @@ fn app_icon() -> egui::IconData {
     let png: &[u8] = include_bytes!("../assets/app-icon/anicraft-macos-512.png");
     #[cfg(not(target_os = "macos"))]
     let png: &[u8] = include_bytes!("../assets/app-icon/hicolor/256x256/apps/ai.storyteller.anicraft.png");
-    eframe::icon_data::from_png_bytes(png).unwrap_or_default()
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        eframe::icon_data::from_png_bytes(png).unwrap_or_default()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = png;
+        egui::IconData::default()
+    }
 }
 
 /// Space left of the menu row for the macOS traffic-light buttons.
