@@ -172,7 +172,7 @@ fn main() {
     wasm_bindgen_futures::spawn_local(async {
         let canvas = web_sys_canvas();
         let Some(canvas) = canvas else { return };
-        let session = open_session(None);
+        let (session, _) = open_session(None);
         let _ = eframe::WebRunner::new()
             .start(
                 canvas,

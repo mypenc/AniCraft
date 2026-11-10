@@ -28,7 +28,7 @@ jobs:
         with:
           version: latest
       - name: Build (release, WebAssembly)
-        run: trunk build --release --public-url "/${{ github.event.repository.name }}/"
+        run: trunk build --release --no-default-features --public-url "/${{ github.event.repository.name }}/"
         env:
           RUSTFLAGS: --cfg=web_sys_unstable_apis --cfg getrandom_backend="wasm_js"
       - run: touch dist/.nojekyll && cp dist/index.html dist/404.html
