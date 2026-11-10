@@ -35,8 +35,8 @@ jobs:
           code=${PIPESTATUS[0]}
           if [ "$code" != "0" ]; then
             # Surface the compiler errors as annotations (readable without the raw log).
-            grep -nE "^(error|warning: unused)" -A7 build.log | head -80 | sed ':a;N;$!ba;s/\n/%0A/g' | sed 's/^/::error title=build errors::/'
-            tail -15 build.log | sed ':a;N;$!ba;s/\n/%0A/g' | sed 's/^/::error title=build tail::/'
+            sed 's/\x1b\[[0-9;]*m//g' build.log > clean.log
+            grep -nE "error(\[|:)|panicked|could not compile|failed to" -B1 -A9 clean.log | grep -v "build pipeline" | head -70 | sed ':a;N;$!ba;s/\n/%0A/g' | sed 's/^/::error title=build errors::/'
           fi
           exit $code
         env:
