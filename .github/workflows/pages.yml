@@ -28,7 +28,17 @@ jobs:
         with:
           version: latest
       - name: Build (release, WebAssembly)
-        run: trunk build --release --no-default-features --public-url "/${{ github.event.repository.name }}/"
+        shell: bash
+        run: |
+          set +e
+          trunk build --release --no-default-features --public-url "/${{ github.event.repository.name }}/" 2>&1 | tee build.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" != "0" ]; then
+            # Surface the compiler errors as annotations (readable without the raw log).
+            grep -nE "^(error|warning: unused)" -A7 build.log | head -80 | sed ':a;N;$!ba;s/\n/%0A/g' | sed 's/^/::error title=build errors::/'
+            tail -15 build.log | sed ':a;N;$!ba;s/\n/%0A/g' | sed 's/^/::error title=build tail::/'
+          fi
+          exit $code
         env:
           RUSTFLAGS: --cfg=web_sys_unstable_apis --cfg getrandom_backend="wasm_js"
       - run: touch dist/.nojekyll && cp dist/index.html dist/404.html
