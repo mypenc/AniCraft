@@ -2,9 +2,12 @@
 //!
 //! It draws what the CPU renderer draws, from the same evaluated frame:
 //! * paths are written in stage space, and strokes get the same stage-space width
-//!   (`width × mean scale`, round joins and caps);
+//!   (`width × mean scale`) with their caps, joins and miter limit, and dashes scaled the same
+//!   way (`stroke-dasharray`, `stroke-dashoffset`; dots are zero-length round-capped dashes),
+//!   as the renderer measures them (ADR 0046);
 //! * gradients keep their local geometry under a `gradientTransform`, padded at the ends;
-//! * colour effects (alpha, tint) are baked into every colour and stop;
+//! * colour effects (every style, ADR 0056) are baked into every colour and stop, and drawn
+//!   on bitmaps through an `feColorMatrix` (alpha alone as `fill-opacity`);
 //! * masks become `clipPath`s (fill areas only, nested through `clip-path` on the clip), and an
 //!   empty mask clips everything, as on the stage;
 //! * outline-mode layers are hairlines in the layer colour;
@@ -13,7 +16,7 @@
 //! The output is deterministic and contains only generated ids and numbers, so it needs no
 //! escaping.
 
-use anicraft_doc::{ColorEffect, DisplayItem, DisplayList, Paint, Rgba, Stage};
+use anicraft_doc::{ColorTransform, DisplayItem, DisplayList, Paint, Rgba, Stage};
 use anicraft_geom::{Affine, FillRule};
 use std::fmt::Write;
 
@@ -26,7 +29,7 @@ pub fn to_svg(dl: &DisplayList, stage: &Stage) -> String {
     let mut body = String::new();
     let mut grad = 0usize;
     // Each bitmap is embedded once (by its pixels), then used by every fill that shows it.
-    let mut images: Vec<(usize, String)> = Vec::new();
+    let mut images: Vec<(usize, bool, String)> = Vec::new();
 
     // Clips, in order (a parent always precedes its children; anything else clips all).
     for (i, parent) in dl.clip_parents.iter().enumerate() {
@@ -80,7 +83,7 @@ pub fn to_svg(dl: &DisplayList, stage: &Stage) -> String {
             continue;
         }
         if let Some(fill) = &item.fill
-            && let Some(paint) = paint_attr(fill, &item.transform, &item.color, &mut defs, &mut grad, item.image.as_ref(), &mut images)
+            && let Some(paint) = paint_attr(fill, &item.transform, &item.color, &mut defs, &mut grad, item.image.as_ref().map(|px| (px, item.smooth)), &mut images)
         {
             let _ = write!(body, "<path d=\"{d}\"{paint}{}{clip}/>", rule_attr("fill-rule", item.fill_rule));
         }
@@ -90,9 +93,10 @@ pub fn to_svg(dl: &DisplayList, stage: &Stage) -> String {
                 let c = item.color.apply(st.color);
                 let _ = write!(
                     body,
-                    "<path d=\"{d}\" fill=\"none\"{} stroke-width=\"{}\" stroke-linejoin=\"round\" stroke-linecap=\"round\"{clip}/>",
+                    "<path d=\"{d}\" fill=\"none\"{} stroke-width=\"{}\"{}{clip}/>",
                     color_attrs("stroke", c),
-                    num(width)
+                    num(width),
+                    style_attrs(st, item.transform.mean_scale())
                 );
             }
         }
@@ -140,6 +144,25 @@ fn num(v: f32) -> String {
     }
     let r = (v * 10_000.0).round() / 10_000.0;
     if r == 0.0 { "0".into() } else { format!("{r}") }
+}
+
+/// A stroke's join, cap, miter limit and dashes as SVG attributes (dash lengths scaled by `k`,
+/// like the width). The default style writes `stroke-linejoin="round" stroke-linecap="round"`.
+fn style_attrs(st: &anicraft_doc::Stroke, k: f32) -> String {
+    let style = &st.style;
+    let mut out = format!(" stroke-linejoin=\"{}\" stroke-linecap=\"{}\"", style.join.key(), style.effective_cap().key());
+    if style.join == anicraft_doc::Join::Miter {
+        let _ = write!(out, " stroke-miterlimit=\"{}\"", num(style.miter_limit));
+    }
+    if let Some(dash) = &style.dash {
+        let (lengths, offset) = dash.pattern(st.width);
+        let list: Vec<String> = lengths.iter().map(|l| num(l * k)).collect();
+        let _ = write!(out, " stroke-dasharray=\"{}\"", list.join(" "));
+        if num(offset * k) != "0" {
+            let _ = write!(out, " stroke-dashoffset=\"{}\"", num(offset * k));
+        }
+    }
+    out
 }
 
 fn hex(c: Rgba) -> String {
@@ -318,7 +341,7 @@ fn effect_svg(f: &anicraft_doc::Filter, i: usize, prims: &mut String) {
 
 /// The fill attribute for `paint`, defining a gradient in `defs` when needed. `None` when the
 /// paint draws nothing.
-fn paint_attr(paint: &Paint, xf: &Affine, fx: &ColorEffect, defs: &mut String, n: &mut usize, image: Option<&std::sync::Arc<anicraft_doc::Pixels>>, images: &mut Vec<(usize, String)>) -> Option<String> {
+fn paint_attr(paint: &Paint, xf: &Affine, fx: &ColorTransform, defs: &mut String, n: &mut usize, image: Option<(&std::sync::Arc<anicraft_doc::Pixels>, bool)>, images: &mut Vec<(usize, bool, String)>) -> Option<String> {
     let stops = match paint {
         Paint::Solid(c) => {
             let c = fx.apply(*c).sanitized();
@@ -328,25 +351,51 @@ fn paint_attr(paint: &Paint, xf: &Affine, fx: &ColorEffect, defs: &mut String, n
         Paint::Bitmap { matrix, .. } => {
             // A pattern of the bitmap at its own pixel size, placed by the shape's transform
             // and the fill's image matrix.
-            // (Opacity comes across; tint has no SVG equivalent and is left out.)
-            let px = image?;
+            // Without Allow Smoothing (ADR 0050) the image keeps hard pixel edges.
+            let (px, smooth) = image?;
             let key = std::sync::Arc::as_ptr(px) as usize;
-            let img_id = match images.iter().find(|(k, _)| *k == key) {
-                Some((_, id)) => id.clone(),
+            let img_id = match images.iter().find(|(k, sm, _)| *k == key && *sm == smooth) {
+                Some((_, _, id)) => id.clone(),
                 None => {
                     let png = crate::encode_png(px.width, px.height, &px.rgba).ok()?;
                     let id = format!("img{}", images.len());
-                    let _ = write!(defs, "<image id=\"{id}\" width=\"{}\" height=\"{}\" href=\"data:image/png;base64,{}\"/>", px.width, px.height, anicraft_doc::base64_encode(&png));
-                    images.push((key, id.clone()));
+                    let look = if smooth { "" } else { " image-rendering=\"pixelated\"" };
+                    let _ = write!(defs, "<image id=\"{id}\" width=\"{}\" height=\"{}\"{look} href=\"data:image/png;base64,{}\"/>", px.width, px.height, anicraft_doc::base64_encode(&png));
+                    images.push((key, smooth, id.clone()));
                     id
                 }
             };
             let id = format!("p{n}");
             *n += 1;
+            // A colour effect beyond alpha is a colour matrix on the image's pixels (ADR 0056):
+            // the same multiply and offset per straight channel, clamped, as the renderer's.
+            let fxs = fx.sanitized();
+            let recolour = fxs.changes_colour() || fxs.add[3] != 0.0;
+            let filter = if recolour {
+                let fid = format!("cm{n}");
+                *n += 1;
+                let [mr, mg, mb, ma] = fxs.mul;
+                let [ar, ag, ab, aa] = fxs.add;
+                let _ = write!(
+                    defs,
+                    "<filter id=\"{fid}\" color-interpolation-filters=\"sRGB\"><feColorMatrix type=\"matrix\" values=\"{} 0 0 0 {} 0 {} 0 0 {} 0 0 {} 0 {} 0 0 0 {} {}\"/></filter>",
+                    num(mr),
+                    num(ar),
+                    num(mg),
+                    num(ag),
+                    num(mb),
+                    num(ab),
+                    num(ma),
+                    num(aa)
+                );
+                format!(" filter=\"url(#{fid})\"")
+            } else {
+                String::new()
+            };
             let m = xf.mul(matrix).m;
             let _ = write!(
                 defs,
-                "<pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" patternTransform=\"matrix({} {} {} {} {} {})\" width=\"{}\" height=\"{}\"><use href=\"#{img_id}\"/></pattern>",
+                "<pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" patternTransform=\"matrix({} {} {} {} {} {})\" width=\"{}\" height=\"{}\"><use href=\"#{img_id}\"{filter}/></pattern>",
                 num(m[0]),
                 num(m[1]),
                 num(m[2]),
@@ -356,7 +405,7 @@ fn paint_attr(paint: &Paint, xf: &Affine, fx: &ColorEffect, defs: &mut String, n
                 px.width,
                 px.height
             );
-            let a = fx.alpha.clamp(0.0, 1.0);
+            let a = if recolour { 1.0 } else { fxs.mul[3].clamp(0.0, 1.0) };
             return Some(if a < 1.0 { format!(" fill=\"url(#{id})\" fill-opacity=\"{}\"", num(a)) } else { format!(" fill=\"url(#{id})\"") });
         }
     };
@@ -404,7 +453,7 @@ mod tests {
             fill,
             stroke: None,
             fill_rule: FillRule::NonZero,
-            color: ColorEffect::default(),
+            color: ColorTransform::default(),
             layer: LayerId(0),
             element: ElementId(0),
             outline: None,
@@ -413,6 +462,7 @@ mod tests {
             guide: false,
             group: None,
             image: None,
+            smooth: true,
         }
     }
 
@@ -421,11 +471,26 @@ mod tests {
     }
 
     #[test]
+    fn bitmaps_take_colour_effects_as_a_colour_matrix() {
+        // ADR 0056: alpha alone is fill-opacity; anything more is an feColorMatrix on the image.
+        let px = Arc::new(anicraft_doc::Pixels { width: 1, height: 1, rgba: vec![10, 20, 30, 255] });
+        let mut b = item(Path::rect(0.0, 0.0, 10.0, 10.0), Some(Paint::Bitmap { bitmap: anicraft_doc::BitmapId(1), repeat: true, matrix: Affine::IDENTITY }));
+        b.image = Some(px);
+        b.color = ColorTransform::alpha(0.5);
+        let svg = to_svg(&DisplayList { items: vec![b.clone()], ..Default::default() }, &stage());
+        assert!(svg.contains("fill-opacity=\"0.5\"") && !svg.contains("feColorMatrix"), "{svg}");
+        b.color = ColorTransform { mul: [-1.0, 0.5, 1.0, 0.8], add: [1.0, 0.25, 0.0, 0.1] };
+        let svg = to_svg(&DisplayList { items: vec![b], ..Default::default() }, &stage());
+        assert!(svg.contains("<feColorMatrix type=\"matrix\" values=\"-1 0 0 0 1 0 0.5 0 0 0.25 0 0 1 0 0 0 0 0 0.8 0.1\"/>"), "{svg}");
+        assert!(svg.contains("filter=\"url(#cm") && !svg.contains("fill-opacity"), "{svg}");
+    }
+
+    #[test]
     fn shapes_strokes_and_effects_come_out_in_stage_space() {
         let mut a = item(Path::rect(0.0, 0.0, 10.0, 10.0), Some(Paint::Solid(Rgba::hex(0xff0000))));
         a.transform = Affine::translate(5.0, 7.0).mul(&Affine::scale(2.0, 2.0));
         a.stroke = Some(Stroke::new(Rgba::BLACK, 3.0));
-        a.color = ColorEffect { alpha: 0.5, ..Default::default() };
+        a.color = ColorTransform::alpha(0.5);
         a.fill_rule = FillRule::EvenOdd;
         let svg = to_svg(&DisplayList { items: vec![a], clip_parents: vec![], groups: Vec::new() }, &stage());
         assert!(svg.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"50\" viewBox=\"0 0 100 50\">"));
@@ -433,6 +498,29 @@ mod tests {
         assert!(svg.contains("d=\"M5 7L25 7L25 27L5 27Z\" fill=\"#ff0000\" fill-opacity=\"0.5\" fill-rule=\"evenodd\""), "{svg}");
         assert!(svg.contains("stroke=\"#000000\" stroke-opacity=\"0.5\" stroke-width=\"6\""), "stroke width scales like the renderer");
         assert!(svg.trim_end().ends_with("</svg>"));
+    }
+
+    #[test]
+    fn stroke_caps_joins_and_dashes_are_written_scaled() {
+        use anicraft_doc::{Cap, Dash, Join, StrokeStyle};
+        let svg_of = |st: Stroke| {
+            let mut a = item(Path::line(Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0)), None);
+            a.transform = Affine::scale(2.0, 2.0);
+            a.stroke = Some(st);
+            to_svg(&DisplayList { items: vec![a], clip_parents: vec![], groups: Vec::new() }, &stage())
+        };
+        // The default style is written as before: round, no dashes.
+        let svg = svg_of(Stroke::new(Rgba::BLACK, 3.0));
+        assert!(svg.contains("stroke-width=\"6\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/>"), "{svg}");
+        assert!(!svg.contains("dasharray") && !svg.contains("miterlimit"));
+        // Dashes, offset and the miter limit; lengths scale with the shape, like the width.
+        let dashed = StrokeStyle { cap: Cap::Butt, join: Join::Miter, miter_limit: 6.0, dash: Some(Dash::Dashed { lengths: vec![4.0, 1.5].into(), offset: 1.0 }) };
+        let svg = svg_of(Stroke::new(Rgba::BLACK, 3.0).with_style(dashed));
+        assert!(svg.contains("stroke-linejoin=\"miter\" stroke-linecap=\"butt\" stroke-miterlimit=\"6\" stroke-dasharray=\"8 3\" stroke-dashoffset=\"2\"/>"), "{svg}");
+        // Dots: zero-length round dashes one width plus the spacing apart.
+        let dotted = StrokeStyle { cap: Cap::Square, join: Join::Bevel, dash: Dash::dotted(2.0), ..StrokeStyle::default() };
+        let svg = svg_of(Stroke::new(Rgba::BLACK, 3.0).with_style(dotted));
+        assert!(svg.contains("stroke-linejoin=\"bevel\" stroke-linecap=\"round\" stroke-dasharray=\"0 10\"/>"), "{svg}");
     }
 
     #[test]
@@ -500,7 +588,7 @@ mod group_tests {
             fill: Some(Paint::Solid(Rgba::BLACK)),
             stroke: None,
             fill_rule: FillRule::NonZero,
-            color: ColorEffect::default(),
+            color: ColorTransform::default(),
             layer: LayerId(0),
             element: ElementId(0),
             outline: None,
@@ -509,6 +597,7 @@ mod group_tests {
             guide: false,
             group: g,
             image: None,
+            smooth: true,
         };
         let dl = DisplayList { items: vec![it(None), it(Some(0)), it(Some(1)), it(Some(0)), it(None)], clip_parents: vec![], groups: vec![Group { parent: None, alpha: 0.5, blend: Default::default(), filters: Default::default(), clip: None }, Group { parent: Some(0), alpha: 0.25, blend: Default::default(), filters: Default::default(), clip: None }] };
         let svg = to_svg(&dl, &Stage { width: 4, height: 4, fps: 24.0, background: Rgba::WHITE });

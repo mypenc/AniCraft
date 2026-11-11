@@ -9,9 +9,10 @@
 //! its scripts, so a script that loops forever costs one frame's budget, then stops with a
 //! message.
 
-use anicraft_doc::actions::{Action, MAX_ACTIONS, PluginScript, check_actions};
-use anicraft_doc::player::{Event, Node, NodeKind, PlayerState, ScriptContext, ScriptHost, ScriptRun, Step};
-use anicraft_doc::{Document, player};
+use anicraft_doc::actions::as3::Problem;
+use anicraft_doc::actions::{Action, CompileResult, FrameScript, MAX_ACTIONS, PluginScript, check_actions};
+use anicraft_doc::player::{Event, Node, NodeKind, PlayerState, ScriptContext, ScriptHost, ScriptRun, Step, TimelineRef};
+use anicraft_doc::{Document, LayerKind, SymbolKind, Timeline, player};
 use anicraft_geom::Vec2;
 use anicraft_plugins::{Host, Kind, Limits, Registry};
 use serde_json::{Map, Value, json};
@@ -176,15 +177,29 @@ pub struct Movie {
     pub state: PlayerState,
     /// Every output line so far, with the step it was written in.
     pub output: Vec<(u64, String)>,
+    /// Sounds started since the owner last took them ([`Movie::take_sounds`]), with the step
+    /// that started each (ADR 0039).
+    sounds: Vec<(u64, anicraft_doc::sound::Started)>,
 }
 
 /// Most output lines a [`Movie`] keeps.
 pub const MAX_MOVIE_OUTPUT: usize = 10_000;
+/// Most started sounds a [`Movie`] holds for its owner (older ones are dropped).
+pub const MAX_MOVIE_SOUNDS: usize = 4_096;
 
 impl Movie {
+    /// The movie at its first frame. The Output starts with a line for each kept script: which
+    /// run and which are skipped and why (ADR 0013 tier 2), said once rather than each time the
+    /// playhead passes.
     pub fn start(doc: &Document, scripts: &mut dyn ScriptHost) -> Movie {
-        let mut m = Movie { state: PlayerState::default(), output: Vec::new() };
-        let s = player::start(doc, scripts);
+        Movie::start_seeded(doc, player::DEFAULT_SEED, scripts)
+    }
+
+    /// [`Movie::start`] with `Math.random()` seeded by `seed`.
+    pub fn start_seeded(doc: &Document, seed: u64, scripts: &mut dyn ScriptHost) -> Movie {
+        let mut m = Movie { state: PlayerState::default(), output: Vec::new(), sounds: Vec::new() };
+        m.output.extend(script_summary(doc).into_iter().map(|l| (0, l)));
+        let s = player::start_seeded(doc, seed, scripts);
         m.take(s);
         m
     }
@@ -209,13 +224,52 @@ impl Movie {
                 self.output.push((self.state.tick, line));
             }
         }
+        let tick = self.state.tick;
+        self.sounds.extend(s.sounds.into_iter().map(|x| (tick, x)));
+        if self.sounds.len() > MAX_MOVIE_SOUNDS {
+            let extra = self.sounds.len() - MAX_MOVIE_SOUNDS;
+            self.sounds.drain(..extra);
+        }
+    }
+
+    /// The sounds started since the last call, with the step (tick) that started each: what
+    /// a window playing the movie should start hearing.
+    pub fn take_sounds(&mut self) -> Vec<(u64, anicraft_doc::sound::Started)> {
+        std::mem::take(&mut self.sounds)
     }
 }
 
-/// Parses a pointer event `{type: move|down|up|click|leave, x, y}` (a click is a press and
-/// a release at one point).
+/// The ActionScript key code a key event names: a number (1-255), a `Keyboard` constant
+/// (`"LEFT"`, `"SPACE"`) or one letter or digit.
+pub fn parse_key(v: &Value) -> Result<u32, String> {
+    match v {
+        Value::Number(n) => n.as_u64().filter(|k| (1..=255).contains(k)).map(|k| k as u32).ok_or_else(|| "a key code is 1-255".to_string()),
+        Value::String(s) => {
+            let t = s.trim();
+            let one = t.chars().count() == 1 && t.chars().all(|c| c.is_ascii_alphanumeric());
+            if one {
+                let c = t.to_ascii_uppercase();
+                return anicraft_doc::actions::as3::ir::key_code(&c).or_else(|| anicraft_doc::actions::as3::ir::key_code(&format!("NUMBER_{c}"))).ok_or_else(|| format!("unknown key '{t}'"));
+            }
+            anicraft_doc::actions::as3::ir::key_code(&t.to_ascii_uppercase()).ok_or_else(|| format!("unknown key '{t}' (a key code, a letter, or a Keyboard name such as LEFT or SPACE)"))
+        }
+        _ => Err("a key event needs a \"key\": a key code, a letter, or a Keyboard name such as LEFT".into()),
+    }
+}
+
+/// Parses an event: a pointer event `{type: move|down|up|click|leave, x, y}` (a click is a
+/// press and a release at one point) or a key event `{type: key_down|key_up|key, key}` (`key`
+/// is a press and a release).
 pub fn parse_events(v: &Value) -> Result<Vec<Event>, String> {
-    let kind = v.get("type").and_then(Value::as_str).ok_or("an event needs a \"type\": move, down, up, click or leave")?;
+    let kind = v.get("type").and_then(Value::as_str).ok_or("an event needs a \"type\": move, down, up, click, leave, key_down, key_up or key")?;
+    if matches!(kind, "key_down" | "key_up" | "key") {
+        let k = parse_key(v.get("key").unwrap_or(&Value::Null))?;
+        return Ok(match kind {
+            "key_down" => vec![Event::KeyDown(k)],
+            "key_up" => vec![Event::KeyUp(k)],
+            _ => vec![Event::KeyDown(k), Event::KeyUp(k)],
+        });
+    }
     let num = |k: &str| -> Result<f32, String> { v.get(k).and_then(Value::as_f64).filter(|f| f.is_finite() && f.abs() <= 1e7).map(|f| f as f32).ok_or(format!("a {kind} event needs a finite \"{k}\"")) };
     Ok(match kind {
         "leave" => vec![Event::Leave],
@@ -226,6 +280,91 @@ pub fn parse_events(v: &Value) -> Result<Vec<Event>, String> {
             let p = Vec2::new(num("x")?, num("y")?);
             vec![Event::Move(p), Event::Down(p), Event::Up(p)]
         }
-        other => return Err(format!("unknown event type '{other}' (move, down, up, click or leave)")),
+        other => return Err(format!("unknown event type '{other}' (move, down, up, click, leave, key_down, key_up or key)")),
     })
+}
+
+/// A kept script (ADR 0013) and where it is.
+pub struct KeptScript<'a> {
+    /// "Scene 1 › Actions, frame 1" (frames 1-based, as the app shows them).
+    pub place: String,
+    /// The timeline runs frame scripts there (a scene or a movie clip, on a layer that plays).
+    pub plays: bool,
+    pub compiled: &'a CompileResult,
+    /// Why it doesn't run on its timeline although it compiles: names from other frames that
+    /// aren't there (ADR 0052).
+    pub links: Vec<Problem>,
+}
+
+impl KeptScript<'_> {
+    /// It runs when the movie plays.
+    pub fn runs(&self) -> bool {
+        self.plays && self.compiled.is_ok() && self.links.is_empty()
+    }
+}
+
+/// Most kept scripts listed.
+pub const MAX_LISTED_SCRIPTS: usize = 1_000;
+
+fn layer_plays(tl: &Timeline, index: usize) -> bool {
+    tl.layers.get(index).is_some_and(|l| l.visible && !matches!(l.kind, LayerKind::Folder | LayerKind::Guide)) && !tl.hidden_by_folder(index)
+}
+
+/// Every kept script in the document: the scenes' first, then the symbols'.
+pub fn kept_scripts(doc: &Document) -> Vec<KeptScript<'_>> {
+    let scenes = doc.scenes.iter().map(|s| (s.name.as_str(), &s.timeline, Some(TimelineRef::Root)));
+    let symbols = doc.library.iter().map(|s| (s.name.as_str(), &s.timeline, (s.kind == SymbolKind::MovieClip).then_some(TimelineRef::Symbol(s.id))));
+    let mut out = Vec::new();
+    let mut root = None;
+    for (name, tl, which) in scenes.chain(symbols) {
+        let runs = which.is_some();
+        let decls = match which {
+            Some(TimelineRef::Root) => root.get_or_insert_with(|| player::decls(doc, TimelineRef::Root)).clone(),
+            Some(w) => player::decls(doc, w),
+            None => Default::default(),
+        };
+        for (index, layer) in tl.layers.iter().enumerate() {
+            for k in &layer.keyframes {
+                let Some(FrameScript::Source(src)) = &k.script else { continue };
+                if out.len() >= MAX_LISTED_SCRIPTS {
+                    return out;
+                }
+                let links = match src.compiled() {
+                    Ok(c) if runs => decls.problems(c),
+                    _ => Vec::new(),
+                };
+                out.push(KeptScript { place: format!("{name} › {}, frame {}", layer.name, u64::from(k.start) + 1), plays: runs && layer_plays(tl, index), compiled: src.compiled(), links });
+            }
+        }
+    }
+    out
+}
+
+/// The Output's opening lines: each kept script that runs (and what in it is ignored), and
+/// each that doesn't, with why.
+pub fn script_summary(doc: &Document) -> Vec<String> {
+    let mut lines = Vec::new();
+    for k in kept_scripts(doc) {
+        match (k.plays, k.compiled) {
+            (false, _) => lines.push(format!("Frame script not run: {}: graphic and button timelines, guide layers and hidden layers don't run frame scripts", k.place)),
+            (true, Ok(c)) if k.links.is_empty() => {
+                lines.push(format!("Frame script runs: {}", k.place));
+                lines.extend(c.notes.iter().map(|n| format!("Frame script at {}: {n}", k.place)));
+            }
+            (true, Ok(_)) => lines.push(not_run(&k.place, &k.links)),
+            (true, Err(problems)) => lines.push(not_run(&k.place, problems)),
+        }
+    }
+    lines
+}
+
+/// "Frame script not run: …" with the first problem and how many more there are.
+fn not_run(place: &str, problems: &[Problem]) -> String {
+    let first = problems.first().map_or_else(String::new, ToString::to_string);
+    let more = match problems.len() {
+        0 | 1 => String::new(),
+        2 => " (and 1 more problem: see the Actions panel)".into(),
+        n => format!(" (and {} more problems: see the Actions panel)", n - 1),
+    };
+    format!("Frame script not run: {place}: {first}{more}")
 }

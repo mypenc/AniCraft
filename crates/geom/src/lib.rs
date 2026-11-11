@@ -5,9 +5,13 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod affine;
+pub mod brush;
 pub mod clip;
 pub mod edit;
 pub mod morph;
+pub mod planar;
+pub mod raw;
+pub mod slice;
 mod fit;
 mod path;
 pub mod svg;
@@ -16,7 +20,7 @@ pub mod walk;
 
 pub use affine::{Affine, Decomposed};
 pub use fit::fit_curve;
-pub use path::{FillRule, Path, PathCmd, Polyline};
+pub use path::{FillRule, Path, PathCmd, Polyline, segment_distance};
 
 use serde::{Deserialize, Serialize};
 use std::ops::{Add, Mul, Neg, Sub};

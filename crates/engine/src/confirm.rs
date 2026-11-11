@@ -40,7 +40,7 @@ fn plural(n: usize, word: &str) -> String {
 
 fn target_layer<'a>(s: &'a Session, p: &Value) -> Option<&'a Layer> {
     let id = p.get("layer").and_then(Value::as_u64).map_or(s.layer, LayerId);
-    s.doc.timeline(s.scene).layer(id)
+    s.timeline().layer(id)
 }
 
 fn target_frame(s: &Session, p: &Value) -> u32 {
@@ -59,7 +59,7 @@ fn lost_keys(s: &Session, p: &Value, hit: impl Fn(&Keyframe) -> bool) -> Vec<(St
         None => vec![p.get("layer").and_then(Value::as_u64).map_or(s.layer, LayerId)],
     };
     ids.iter()
-        .filter_map(|id| s.doc.timeline(s.scene).layer(*id))
+        .filter_map(|id| s.timeline().layer(*id))
         .flat_map(|l| l.keyframes.iter().filter(|k| !k.elements.is_empty() && hit(k)).map(|k| (l.name.clone(), k.elements.len())))
         .collect()
 }
@@ -107,23 +107,22 @@ pub fn confirmation(s: &Session, id: &str, p: &Value) -> Option<Confirmation> {
         "file.save" | "file.save_as" => {
             let path = Path::new(p.get("path").and_then(Value::as_str)?);
             let same = s.path.as_deref() == Some(path);
-            (!same && path.exists()).then(|| overwrite(path, "Saving"))
+            (!same && crate::vfs::exists(path)).then(|| overwrite(path, "Saving"))
         }
         "file.export_png" | "file.export_gif" | "file.export_svg" | "file.export_video" | "file.export_lottie" | "file.export_html" | "file.export_audio" => {
             let path = Path::new(p.get("path").and_then(Value::as_str)?);
-            path.exists().then(|| overwrite(path, "Exporting"))
+            crate::vfs::exists(path).then(|| overwrite(path, "Exporting"))
         }
         "file.export_sprite_sheet" => {
             // The sheet and its frame map: either one already there is replaced.
             let path = Path::new(p.get("path").and_then(Value::as_str)?);
             let json = path.with_extension("json");
-            [path, json.as_path()].into_iter().find(|f| f.exists()).map(|f| overwrite(f, "Exporting"))
+            [path, json.as_path()].into_iter().find(|f| crate::vfs::exists(f)).map(|f| overwrite(f, "Exporting"))
         }
         "file.export_png_sequence" => {
             let dir = Path::new(p.get("dir").and_then(Value::as_str)?);
-            let has_frames = std::fs::read_dir(dir).ok()?.take(10_000).flatten().any(|e| {
-                let n = e.file_name();
-                let n = n.to_string_lossy();
+            let has_frames = crate::vfs::list(dir, 10_000).iter().any(|e| {
+                let n = e.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
                 n.starts_with("frame_") && n.ends_with(".png")
             });
             has_frames.then(|| Confirmation {
@@ -145,7 +144,96 @@ pub fn confirmation(s: &Session, id: &str, p: &Value) -> Option<Confirmation> {
                 irreversible: false,
             })
         }
-        "camera.remove" => camera_removal(s, s.doc.timeline(s.scene).camera_layer()?),
+        "find.replace" => {
+            // Replace All over many places asks first (ADR 0058); one undo step takes it back.
+            let n = crate::find::replace_count(s, p)?;
+            (n > crate::find::REPLACE_ASK).then(|| Confirmation {
+                title: "Replace all?".into(),
+                message: format!("This replaces what was found in {}. You can undo this in one step.", plural(n, "place")),
+                action: "Replace All".into(),
+                irreversible: false,
+            })
+        }
+        "library.delete" => {
+            // Routine when nothing deleted is in use and no folder holds anything (undo is there);
+            // asks when instances go with it or a folder takes its contents (ADR 0050).
+            let list = crate::cmds_library::entries_of(s, p, "items").ok()?;
+            let (items, folders) = crate::cmds_library::deletion(s, &list);
+            let uses = s.doc.library_uses();
+            let used: Vec<&anicraft_doc::LibraryItem> = items.iter().filter(|i| uses.get(i).is_some_and(|n| *n > 0)).collect();
+            let n_uses: usize = used.iter().filter_map(|i| uses.get(*i)).sum();
+            let inside = items.len() + folders.len() - list.len();
+            if used.is_empty() && inside == 0 {
+                return None;
+            }
+            let what = match list.as_slice() {
+                [one] => format!("“{}”", s.doc.entry_name(*one).unwrap_or("")),
+                _ => plural(list.len(), "item"),
+            };
+            let mut parts = Vec::new();
+            if inside > 0 {
+                parts.push(format!("{what} {} {}, deleted with {}.", if list.len() == 1 { "holds" } else { "hold" }, plural(inside, "item"), if list.len() == 1 { "it" } else { "them" }));
+            }
+            if !used.is_empty() {
+                parts.push(format!("{} used {} in the movie; {} go too.", if used.len() == 1 { "One of them is".to_string() } else { format!("{} of them are", used.len()) }, plural(n_uses, "time"), if n_uses == 1 { "that use" } else { "those uses" }));
+            }
+            parts.push("You can undo this.".into());
+            Some(Confirmation {
+                title: if inside > 0 && list.len() == 1 { "Delete folder?".into() } else { "Delete from Library?".into() },
+                message: parts.join(" "),
+                action: "Delete".into(),
+                irreversible: false,
+            })
+        }
+        "library.delete_unused" => {
+            let unused = s.doc.unused_items();
+            let names: Vec<String> = unused.iter().take(5).filter_map(|i| s.doc.item_name(*i)).map(|n| format!("“{n}”")).collect();
+            let more = unused.len().saturating_sub(names.len());
+            (!unused.is_empty()).then(|| Confirmation {
+                title: "Delete unused items?".into(),
+                message: format!(
+                    "Nothing in the movie uses {}: {}{}. They leave the Library. You can undo this.",
+                    if unused.len() == 1 { "this item".to_string() } else { format!("these {} items", unused.len()) },
+                    names.join(", "),
+                    if more > 0 { format!(" and {more} more") } else { String::new() }
+                ),
+                action: "Delete Unused".into(),
+                irreversible: false,
+            })
+        }
+        "draw.erase_all" => {
+            // Double-clicking the Eraser: everything on the stage at this frame (ADR 0034).
+            let layers = crate::cmds_erase::erasable_layers(s);
+            let elements: usize = layers.iter().map(|(_, n)| n).sum();
+            (elements > 0).then(|| Confirmation {
+                title: "Erase everything?".into(),
+                message: format!("Everything on the stage at frame {} goes: {} on {}. Locked and hidden layers are kept. You can undo this.", s.frame + 1, plural(elements, "element"), plural(layers.len(), "layer")),
+                action: "Erase Everything".into(),
+                irreversible: false,
+            })
+        }
+        "camera.remove" => camera_removal(s, s.timeline().camera_layer()?),
+        "bone.remove" => {
+            // The bone's moves in every pose go with it (ADR 0043); one pose loses nothing.
+            let id = anicraft_doc::BoneId(p.get("bone").and_then(Value::as_u64)?);
+            let l = s.timeline().layers.iter().find(|l| l.armature.as_ref().is_some_and(|a| a.bone(id).is_some()))?;
+            let arm = l.armature.as_deref()?;
+            let n = crate::cmds_bone::poses(l);
+            let below = arm.subtree(id).len().saturating_sub(1);
+            let name = arm.bone(id).map(|b| if b.name.is_empty() { "The bone".to_string() } else { format!("“{}”", b.name) })?;
+            (n > 1).then(|| Confirmation {
+                title: "Remove bone?".into(),
+                message: format!(
+                    "{name}{} {} posed over {}; removing takes {} out of every pose. The instances stay where they are now, on a layer of their own. You can undo this.",
+                    if below > 0 { format!(" and the {} below it", plural(below, "bone")) } else { String::new() },
+                    if below > 0 { "are" } else { "is" },
+                    plural(n, "keyframe"),
+                    if below > 0 { "them" } else { "it" },
+                ),
+                action: "Remove Bone".into(),
+                irreversible: false,
+            })
+        }
         "layer.delete" => {
             let l = target_layer(s, p)?;
             if l.kind == anicraft_doc::LayerKind::Camera {
@@ -153,7 +241,7 @@ pub fn confirmation(s: &Session, id: &str, p: &Value) -> Option<Confirmation> {
             }
             if l.kind == anicraft_doc::LayerKind::Folder {
                 // A folder goes with everything in it.
-                let tl = s.doc.timeline(s.scene);
+                let tl = s.timeline();
                 let i = tl.layers.iter().position(|x| x.id == l.id)?;
                 let inner = tl.layers.get(tl.group_range(i))?;
                 let n = inner.len().saturating_sub(1);

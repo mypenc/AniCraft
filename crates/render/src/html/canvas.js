@@ -40,7 +40,10 @@
       return scratch.isPointInStroke(stagePath(path, m), x, y);
     },
   };
-  const player = new AniCraft.Player(movie, host);
+  // Each page load gets its own Math.random() sequence (a movie's, not for security); the
+  // player itself is deterministic.
+  const seed = Date.now() % 4294967296;
+  const player = new AniCraft.Player(movie, host, seed);
 
   function stagePath(path, m) {
     const out = new Path2D();
@@ -110,16 +113,45 @@
     if (p.b !== undefined) {
       const im = images[p.b];
       if (!im || !im.complete || !im.naturalWidth) return "rgba(128,128,128,1)";
-      const key = f;
+      // A colour effect beyond alpha draws the bitmap's pixels through it (ADR 0056), as the
+      // renderer does: once per bitmap and effect while the effect stays the same.
+      const recolour = AniCraft.recolours(fx);
+      const key = recolour ? f + ":" + fx.join(",") : f;
       let pat = patterns.get(key);
       if (!pat) {
-        pat = g.createPattern(im, p.rep ? "repeat" : "no-repeat");
+        if (patterns.size > 256) patterns.clear();
+        pat = g.createPattern(recolour ? recoloured(im, fx) : im, p.rep ? "repeat" : "no-repeat");
         if (pat && p.m && pat.setTransform) pat.setTransform(new DOMMatrix(p.m));
         patterns.set(key, pat);
       }
       return pat;
     }
     return null;
+  }
+
+  // `im`'s pixels through colour transform `fx`, on a canvas of its size.
+  function recoloured(im, fx) {
+    const c = document.createElement("canvas");
+    c.width = im.naturalWidth;
+    c.height = im.naturalHeight;
+    const g = c.getContext("2d");
+    g.drawImage(im, 0, 0);
+    let px;
+    try {
+      px = g.getImageData(0, 0, c.width, c.height);
+    } catch (e) {
+      return im;
+    }
+    const d = px.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const o = AniCraft.applyEffect(fx, [d[i] / 255, d[i + 1] / 255, d[i + 2] / 255, d[i + 3] / 255]);
+      d[i] = Math.round(o[0] * 255);
+      d[i + 1] = Math.round(o[1] * 255);
+      d[i + 2] = Math.round(o[2] * 255);
+      d[i + 3] = Math.round(o[3] * 255);
+    }
+    g.putImageData(px, 0, 0);
+    return c;
   }
 
   function draw() {
@@ -150,22 +182,40 @@
           const style = paintStyle(g, it.f, it.c);
           if (style) {
             const bitmap = movie.paints[it.f] && movie.paints[it.f].b !== undefined;
-            g.globalAlpha = bitmap ? Math.min(Math.max(it.c[0], 0), 1) : 1;
+            g.globalAlpha = bitmap && !AniCraft.recolours(it.c) ? Math.min(Math.max(it.c[3], 0), 1) : 1;
             set(g, it.m);
             g.fillStyle = style;
+            // A bitmap without Allow Smoothing keeps hard pixel edges (ADR 0050).
+            const hard = bitmap && movie.paints[it.f].px === true;
+            if (hard) g.imageSmoothingEnabled = false;
             g.fill(path, it.eo ? "evenodd" : "nonzero");
+            if (hard) g.imageSmoothingEnabled = true;
             g.globalAlpha = 1;
           }
         }
         if (it.s) {
-          const w = it.s[4] * AniCraft.meanScale(it.m) * k;
+          const scale = AniCraft.meanScale(it.m);
+          const w = it.s[4] * scale * k;
           if (w > 0 && Number.isFinite(w)) {
             g.setTransform(k, 0, 0, k, 0, 0);
             g.lineWidth = w / k;
-            g.lineJoin = "round";
-            g.lineCap = "round";
+            // Caps, joins and dashes (stage units: local lengths × the mean scale, like the width).
+            const st = it.k;
+            g.lineJoin = st ? st.j : "round";
+            g.lineCap = st ? st.c : "round";
+            if (st) g.miterLimit = st.ml;
+            const dashed = st && st.d && st.d.length > 0;
+            if (dashed) {
+              g.setLineDash(st.d.map((x) => x * scale));
+              g.lineDashOffset = (st.o || 0) * scale;
+            }
             g.strokeStyle = css(AniCraft.applyEffect(it.c, it.s));
             g.stroke(stagePath(path, it.m));
+            if (dashed) {
+              g.setLineDash([]);
+              g.lineDashOffset = 0;
+            }
+            if (st) g.miterLimit = 10;
           }
         }
       },
@@ -215,7 +265,9 @@
 
   // ----- sound ------------------------------------------------------------------------------------
   // Event and Start sounds play in full from their keyframe; Stream sounds play over their
-  // keyframe's span; Stop stops the sound. Browsers start audio only after a click or a key.
+  // keyframe's span; Stop stops the sound. Each is heard at its layers' volume, through its
+  // effect's envelope (a gain per channel, straight lines between [seconds, left, right]
+  // points). Browsers start audio only after a click or a key.
   let audio = null;
   const buffers = [];
   const voices = [];
@@ -236,7 +288,7 @@
   }
   function play(sounds) {
     if (!audio || audio.state !== "running") return;
-    for (const [i, sync, repeat, loop, span] of sounds) {
+    for (const [i, sync, repeat, loop, span, gain, env] of sounds) {
       const b = buffers[i];
       const playing = voices.filter((v) => v.sound === i && v.end > audio.currentTime);
       if (sync === "stop") {
@@ -246,8 +298,31 @@
       if (!b || (sync === "start" && playing.length)) continue;
       const src = audio.createBufferSource();
       src.buffer = b;
-      src.connect(audio.destination);
       const t = audio.currentTime;
+      let out = src;
+      if (env && env.length) {
+        // Up to stereo (a mono sound on both sides), split, one gain per channel, merged.
+        const up = audio.createGain();
+        up.channelCount = 2;
+        up.channelCountMode = "explicit";
+        up.channelInterpretation = "speakers";
+        const split = audio.createChannelSplitter(2);
+        const merge = audio.createChannelMerger(2);
+        src.connect(up);
+        up.connect(split);
+        for (const c of [0, 1]) {
+          const g = audio.createGain();
+          g.gain.setValueAtTime(env[0][1 + c], t);
+          for (const p of env) g.gain.linearRampToValueAtTime(p[1 + c], t + p[0]);
+          split.connect(g, c);
+          g.connect(merge, 0, c);
+        }
+        out = merge;
+      }
+      const volume = audio.createGain();
+      volume.gain.value = gain === undefined || gain === null ? 1 : gain;
+      out.connect(volume);
+      volume.connect(audio.destination);
       let end = t + b.duration * Math.max(repeat, 1);
       if (sync === "stream") end = t + span / movie.stage.fps;
       src.loop = loop || repeat > 1 || sync === "stream";
@@ -284,7 +359,19 @@
     report(player.input([{ type: "leave" }]));
     draw();
   });
-  window.addEventListener("keydown", audioOn);
+  // Keys go to the movie's keyboard listeners (ActionScript key codes are the browser's).
+  function key(type, e) {
+    if (e.repeat && type === "keyup") return;
+    report(player.input([{ type: type, code: e.keyCode }]));
+    // Arrows and space would scroll the page; a movie that listens for keys keeps them.
+    if (player.st.stage.some((l) => l.ev === "key_down" || l.ev === "key_up") && [32, 37, 38, 39, 40].indexOf(e.keyCode) >= 0) e.preventDefault();
+    draw();
+  }
+  window.addEventListener("keydown", (e) => {
+    audioOn();
+    key("keydown", e);
+  });
+  window.addEventListener("keyup", (e) => key("keyup", e));
   window.addEventListener("resize", resize);
 
   const dt = 1000 / movie.stage.fps;
@@ -307,5 +394,5 @@
     report(player.start());
     resize();
     requestAnimationFrame(tick);
-  });
+  }).catch((e) => console.error("AniCraft: the movie couldn't start", e));
 })();

@@ -7,15 +7,20 @@
 pub use anicraft_audio as audio;
 pub use anicraft_actions as actions;
 
+pub mod armature;
 mod bitmap;
+mod color_effect;
 pub mod camera;
 mod filter;
 mod easing;
 mod eval;
 mod hints;
+pub mod nine_slice;
+pub mod library;
 pub mod motion;
 pub mod path_table;
 pub mod width;
+pub mod stroke_style;
 pub mod player;
 pub mod sample;
 pub mod sound;
@@ -23,13 +28,18 @@ pub mod sound;
 pub use filter::{Filter, FilterSide, MAX_BLUR, MAX_QUALITY, MAX_RAMP_STOPS, REST_SNAP, default_bevel_ramp, default_glow_ramp, pinned_stop, ramp_at};
 pub use bitmap::{Bitmap, BitmapId, ImageError, MAX_BITMAP_EDGE, Pixels, base64_encode, decode_png, image_to_png};
 pub use easing::Easing;
+pub use color_effect::{ADVANCED_ADD, ADVANCED_MUL, ColorEffect, ColorStyle, ColorTransform};
 pub use hints::{HINT_TOLERANCE, HintSide, MAX_SHAPE_HINTS, ShapeHint, hint_index, hint_letter, nearest_outline, placed_on, shapes_centre};
-pub use motion::{MotionTween, Property, PropertyKey, Props, Track};
-pub use sound::{FrameSound, Sound, SoundFormat, SoundId, SoundSync};
+pub use library::{FolderId, LibraryEntry, LibraryFolder, LibraryItem, LibraryTree, NameError};
+pub use motion::{MotionTween, OnPath, PROPERTIES, Pin, PinError, Property, PropertyKey, Props, Track, motion_path};
+pub use sound::{EnvelopePoint, FrameSound, Sound, SoundEffect, SoundFormat, SoundId, SoundSync};
 pub use width::{MAX_WIDTH_FACTOR, MAX_WIDTH_POINTS, ProfilePreset, WidthPoint, WidthProfile};
+pub use stroke_style::{Cap, Dash, DashKind, Join, StrokeStyle};
 pub use camera::Camera;
-pub use eval::{DisplayItem, DisplayList, Group, MAX_SYMBOL_DEPTH, evaluate, evaluate_guided, evaluate_layer_elements, evaluate_player, evaluate_scene, evaluate_scene_camera, guide_walk, instance_start};
-pub use actions::{Action, ButtonEvent, EventHandler, FrameScript, PluginScript};
+pub use nine_slice::symbol_box;
+pub use armature::{Armature, Bone, BoneId, JointAngle, Limits, Pose};
+pub use eval::{DisplayItem, DisplayList, Group, MAX_SYMBOL_DEPTH, evaluate, evaluate_guided, evaluate_layer_elements, evaluate_player, evaluate_scene, evaluate_scene_camera, evaluate_timeline, evaluate_timeline_at, guide_walk, instance_start};
+pub use actions::{Action, ButtonEvent, EventHandler, FrameScript, Language, PluginScript, SourceScript};
 
 use anicraft_geom::{Affine, FillRule, Path, Rect, Vec2};
 use serde::{Deserialize, Serialize};
@@ -124,6 +134,18 @@ impl Paint {
         }
     }
 
+    /// The paint carried by `m` (its geometry moved from one space to another), so a shape in
+    /// the new space shows it where it was: gradient ends and centre are mapped, a radial
+    /// gradient's radius scales by the mean scale, a bitmap's matrix is composed.
+    pub fn transformed(&self, m: &Affine) -> Paint {
+        match self {
+            Paint::Solid(_) => self.clone(),
+            Paint::Linear { start, end, stops } => Paint::Linear { start: m.apply(*start), end: m.apply(*end), stops: stops.clone() },
+            Paint::Radial { center, radius, stops } => Paint::Radial { center: m.apply(*center), radius: radius * m.mean_scale(), stops: stops.clone() },
+            Paint::Bitmap { bitmap, repeat, matrix } => Paint::Bitmap { bitmap: *bitmap, repeat: *repeat, matrix: m.mul(matrix) },
+        }
+    }
+
     pub fn lerp(&self, o: &Paint, t: f32) -> Paint {
         let lerp_stops = |a: &[GradientStop], b: &[GradientStop]| -> Option<Vec<GradientStop>> {
             (a.len() == b.len()).then(|| {
@@ -145,7 +167,8 @@ impl Paint {
     }
 }
 
-/// Stroke style: round joins and caps, one width or a width profile (ADR 0018).
+/// A line: colour, width, an optional width profile (ADR 0018) and its style: caps, joins,
+/// miter limit, dashes (ADR 0046).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(from = "StrokeFile")]
 pub struct Stroke {
@@ -155,40 +178,60 @@ pub struct Stroke {
     /// How the width varies along each subpath (`None`: the same everywhere). Never uniform.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<WidthProfile>,
+    /// Caps, joins and dashes. The default (round, solid) is written as nothing, so strokes
+    /// without a style are stored as before.
+    #[serde(default, skip_serializing_if = "StrokeStyle::is_default")]
+    pub style: StrokeStyle,
 }
 
-/// What a file may hold for a stroke (a uniform profile is dropped on load).
+/// What a file may hold for a stroke (a uniform profile is dropped on load, the style is
+/// sanitized).
 #[derive(Deserialize)]
 struct StrokeFile {
     color: Rgba,
     width: f32,
     #[serde(default)]
     profile: Option<WidthProfile>,
+    #[serde(default)]
+    style: StrokeStyle,
 }
 
 impl From<StrokeFile> for Stroke {
     fn from(f: StrokeFile) -> Stroke {
-        Stroke { color: f.color, width: f.width, profile: f.profile.filter(|p| !p.is_uniform()) }
+        Stroke { color: f.color, width: f.width, profile: f.profile.filter(|p| !p.is_uniform()), style: f.style.sanitized() }
     }
 }
 
 impl Stroke {
-    /// A stroke of one width.
+    /// A solid stroke of one width with round caps and joins.
     pub fn new(color: Rgba, width: f32) -> Stroke {
-        Stroke { color, width, profile: None }
+        Stroke { color, width, profile: None, style: StrokeStyle::default() }
     }
     pub fn with_profile(self, profile: Option<WidthProfile>) -> Stroke {
         Stroke { profile: profile.filter(|p| !p.is_uniform()), ..self }
     }
+    /// The same stroke with caps, joins and dashes from `style` (sanitized).
+    pub fn with_style(self, style: StrokeStyle) -> Stroke {
+        Stroke { style: style.sanitized(), ..self }
+    }
     /// The farthest the stroke reaches from its path (local units): half its nominal width
-    /// times the profile's widest factor.
+    /// times the profile's widest factor, times what miter corners and square caps add.
     pub fn reach(&self) -> f32 {
         let w = if self.width.is_finite() { self.width.max(0.0) } else { 0.0 };
-        w * 0.5 * self.profile.as_ref().map_or(1.0, WidthProfile::max_factor)
+        w * 0.5 * self.profile.as_ref().map_or(1.0, WidthProfile::max_factor) * self.style.reach_factor()
     }
-    /// The stroke `t` of the way to `o` (shape tweens): colour, width and profile blend.
+    /// The stroke of a shape scaled by `k` (mean scale): the width and the dashes scale.
+    pub fn scaled(&self, k: f32) -> Stroke {
+        Stroke { width: self.width * k, style: self.style.scaled(k), ..self.clone() }
+    }
+    /// The stroke `t` of the way to `o` (shape tweens): colour, width, profile and style blend.
     pub fn lerp(&self, o: &Stroke, t: f32) -> Stroke {
-        Stroke { color: self.color.lerp(o.color, t), width: anicraft_geom::lerp(self.width, o.width, t), profile: WidthProfile::lerp(self.profile.as_ref(), o.profile.as_ref(), t) }
+        Stroke {
+            color: self.color.lerp(o.color, t),
+            width: anicraft_geom::lerp(self.width, o.width, t),
+            profile: WidthProfile::lerp(self.profile.as_ref(), o.profile.as_ref(), t),
+            style: self.style.lerp(&o.style, t),
+        }
     }
 }
 
@@ -214,17 +257,21 @@ pub struct Shape {
     pub stroke: Option<Stroke>,
     #[serde(default)]
     pub fill_rule: FillRule,
+    /// Part of its layer's merged drawing (ADR 0031): cut and joined by what is drawn over it.
+    /// Otherwise a drawing object, which keeps to itself.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub merge: bool,
 }
 
 impl PartialEq for Shape {
     fn eq(&self, o: &Shape) -> bool {
-        arc_eq(&self.path, &o.path) && self.fill == o.fill && self.stroke == o.stroke && self.fill_rule == o.fill_rule
+        arc_eq(&self.path, &o.path) && self.fill == o.fill && self.stroke == o.stroke && self.fill_rule == o.fill_rule && self.merge == o.merge
     }
 }
 
 impl Shape {
     pub fn filled(path: Path, fill: Paint) -> Shape {
-        Shape { path: Arc::new(path), fill: Some(fill), stroke: None, fill_rule: FillRule::NonZero }
+        Shape { path: Arc::new(path), fill: Some(fill), stroke: None, fill_rule: FillRule::NonZero, merge: false }
     }
     pub fn with_stroke(mut self, color: Rgba, width: f32) -> Shape {
         self.stroke = Some(Stroke::new(color, width));
@@ -420,44 +467,6 @@ pub struct TextBlock {
     pub box_height: f32,
 }
 
-/// Colour effect applied to an element and everything inside it.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ColorEffect {
-    /// Alpha multiplier `0..=1`.
-    pub alpha: f32,
-    /// Tint colour mixed in by `tint_amount`.
-    pub tint: Rgba,
-    pub tint_amount: f32,
-}
-
-impl Default for ColorEffect {
-    fn default() -> Self {
-        ColorEffect { alpha: 1.0, tint: Rgba::WHITE, tint_amount: 0.0 }
-    }
-}
-
-impl ColorEffect {
-    /// Effect of `inner` nested inside `self`.
-    pub fn concat(&self, inner: &ColorEffect) -> ColorEffect {
-        // Tints compose by keeping the stronger one; alpha multiplies.
-        let (tint, amount) = if inner.tint_amount >= self.tint_amount { (inner.tint, inner.tint_amount) } else { (self.tint, self.tint_amount) };
-        ColorEffect { alpha: self.alpha * inner.alpha, tint, tint_amount: amount }
-    }
-    pub fn lerp(&self, o: &ColorEffect, t: f32) -> ColorEffect {
-        ColorEffect {
-            alpha: anicraft_geom::lerp(self.alpha, o.alpha, t),
-            tint: self.tint.lerp(o.tint, t),
-            tint_amount: anicraft_geom::lerp(self.tint_amount, o.tint_amount, t),
-        }
-    }
-    pub fn apply(&self, c: Rgba) -> Rgba {
-        let k = self.tint_amount.clamp(0.0, 1.0);
-        let mut out = c.lerp(self.tint.with_alpha(c.a), k);
-        out.a = c.a * self.alpha.clamp(0.0, 1.0);
-        out
-    }
-}
-
 /// An instance on a keyframe.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Element {
@@ -570,17 +579,20 @@ pub struct Keyframe {
     /// script (ADR 0024). Rendering and exports ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<FrameScript>,
+    /// On an armature layer: the joint angles this keyframe poses the armature with (ADR 0043).
+    #[serde(default, skip_serializing_if = "Pose::is_empty")]
+    pub pose: Pose,
 }
 
 impl PartialEq for Keyframe {
     fn eq(&self, o: &Keyframe) -> bool {
-        self.start == o.start && self.duration == o.duration && self.tween == o.tween && self.motion == o.motion && self.hints == o.hints && self.label == o.label && self.sound == o.sound && self.script == o.script && arcs_eq(&self.elements, &o.elements)
+        self.start == o.start && self.duration == o.duration && self.tween == o.tween && self.motion == o.motion && self.hints == o.hints && self.label == o.label && self.sound == o.sound && self.script == o.script && self.pose == o.pose && arcs_eq(&self.elements, &o.elements)
     }
 }
 
 impl Keyframe {
     pub fn new(start: u32, duration: u32) -> Self {
-        Keyframe { start, duration: duration.max(1), elements: Vec::new(), tween: None, motion: None, hints: Vec::new(), label: String::new(), sound: None, script: None }
+        Keyframe { start, duration: duration.max(1), elements: Vec::new(), tween: None, motion: None, hints: Vec::new(), label: String::new(), sound: None, script: None, pose: Pose::default() }
     }
     /// Mutable access to the elements whose ids satisfy `pick`, cloning only those.
     pub fn elements_mut_where(&mut self, mut pick: impl FnMut(ElementId) -> bool) -> Vec<&mut Element> {
@@ -609,6 +621,9 @@ pub enum LayerKind {
     /// The camera (ADR 0027): at most one per scene timeline, always the top layer; its
     /// keyframes hold the camera, which views every other layer. Draws nothing itself.
     Camera,
+    /// An armature (ADR 0043): symbol instances joined by bones ([`Layer::armature`]), posed
+    /// on each keyframe ([`Keyframe::pose`]) and tweened between poses.
+    Armature,
 }
 
 /// Deepest nesting of folders (and a mask inside them) that is kept.
@@ -640,10 +655,25 @@ pub struct Layer {
     /// move a deeper layer less (parallax). Not the nesting depth ([`Timeline::depth`]).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub depth: f32,
+    /// Volume of the sounds on this layer (and in the symbols on it), `0..=1` (ADR 0039).
+    #[serde(default = "full", skip_serializing_if = "is_full")]
+    pub volume: f32,
+    /// The layer's sounds are silent (in playback and every export).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub muted: bool,
+    /// An armature layer's bones (ADR 0043); `None` on every other kind of layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub armature: Option<Arc<Armature>>,
 }
 
 fn is_zero(v: &f32) -> bool {
     *v == 0.0
+}
+fn full() -> f32 {
+    1.0
+}
+fn is_full(v: &f32) -> bool {
+    *v == 1.0
 }
 
 impl PartialEq for Layer {
@@ -657,6 +687,12 @@ impl PartialEq for Layer {
             && self.outline == o.outline
             && self.color == o.color
             && self.depth.to_bits() == o.depth.to_bits()
+            && self.volume.to_bits() == o.volume.to_bits()
+            && self.muted == o.muted
+            && match (&self.armature, &o.armature) {
+                (Some(a), Some(b)) => arc_eq(a, b),
+                (a, b) => a.is_none() && b.is_none(),
+            }
             && arcs_eq(&self.keyframes, &o.keyframes)
     }
 }
@@ -681,7 +717,24 @@ impl Layer {
             color: default_layer_color(),
             keyframes: vec![Arc::new(Keyframe::new(0, 1))],
             depth: 0.0,
+            volume: 1.0,
+            muted: false,
+            armature: None,
         }
+    }
+    /// The gain this layer gives its sounds: its volume, or silence when muted.
+    pub fn sound_gain(&self) -> f32 {
+        if self.muted {
+            0.0
+        } else if self.volume.is_finite() {
+            self.volume.clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+    }
+    /// Whether a keyframe of this layer holds a sound.
+    pub fn has_sounds(&self) -> bool {
+        self.keyframes.iter().any(|k| k.sound.is_some())
     }
     /// Mutable keyframe `i` (copy-on-write: clones it only if it is shared).
     pub fn keyframe_mut(&mut self, i: usize) -> Option<&mut Keyframe> {
@@ -929,7 +982,73 @@ pub struct Symbol {
     pub name: String,
     #[serde(default)]
     pub kind: SymbolKind,
+    /// The class scripts know the symbol by (Animate's "linkage"), kept as text (ADR 0013).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linkage: Option<Linkage>,
+    /// Guides for 9-slice scaling (ADR 0055): an instance scaled keeps the corners outside them
+    /// unscaled. `None`: the symbol scales as a whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_grid: Option<ScaleGrid>,
     pub timeline: Timeline,
+}
+
+/// The four 9-slice guides of a symbol (ADR 0055), in the symbol's own space: two vertical
+/// lines at `x = left` and `x = right`, two horizontal ones at `y = top` and `y = bottom`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScaleGrid {
+    pub left: f32,
+    pub right: f32,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+impl ScaleGrid {
+    /// Guides a quarter of the way in from each edge of `bounds` (what turning guides on gives).
+    pub fn inset(bounds: &Rect) -> ScaleGrid {
+        let (w, h) = (bounds.width() * 0.25, bounds.height() * 0.25);
+        ScaleGrid { left: bounds.min.x + w, right: bounds.max.x - w, top: bounds.min.y + h, bottom: bounds.max.y - h }
+    }
+
+    /// Whether the guides are usable: finite, within the format's range, and in order.
+    pub fn check(&self) -> Result<(), String> {
+        let v = [self.left, self.right, self.top, self.bottom];
+        if !v.iter().all(|x| x.is_finite() && x.abs() <= MAX_GRID_COORD) {
+            return Err(format!("9-slice guides must be numbers within ±{MAX_GRID_COORD}"));
+        }
+        if self.left > self.right {
+            return Err("the left 9-slice guide must not be right of the right one".into());
+        }
+        if self.top > self.bottom {
+            return Err("the top 9-slice guide must not be below the bottom one".into());
+        }
+        Ok(())
+    }
+}
+
+/// Largest 9-slice guide coordinate accepted from files and commands.
+pub const MAX_GRID_COORD: f32 = 1_000_000.0;
+
+/// A symbol's script class: what scripts create it by, and the class it extends. Kept with
+/// the document and shown, never run (ADR 0013 tier 1).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Linkage {
+    /// A dotted class name (`com.example.Hero`), or an older document's linkage identifier.
+    pub class: String,
+    /// The class it extends, when the file names one (`flash.display.MovieClip`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base: String,
+}
+
+impl Linkage {
+    pub fn check(&self) -> Result<(), String> {
+        if !actions::valid_class_name(&self.class) {
+            return Err(format!("“{}” isn't a class name: letters, digits, _ and $ joined by dots, at most {} characters", self.class, actions::MAX_CLASS_CHARS));
+        }
+        if !self.base.is_empty() && !actions::valid_class_name(&self.base) {
+            return Err(format!("“{}” isn't a class name", self.base));
+        }
+        Ok(())
+    }
 }
 
 /// Stage settings.
@@ -984,6 +1103,13 @@ pub struct Document {
     /// Sounds in the library, placed on keyframes through [`FrameSound`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sounds: Vec<Arc<Sound>>,
+    /// The Library's folders and which folder each item is in (ADR 0050).
+    #[serde(default, skip_serializing_if = "library_tree_is_empty")]
+    pub library_tree: Arc<LibraryTree>,
+    /// The class scripts run the main timeline as (Animate's "document class"), kept as text
+    /// (ADR 0013 tier 1); empty when there is none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub document_class: String,
     /// Next free id for layers, elements and symbols.
     pub next_id: u64,
 }
@@ -1003,6 +1129,10 @@ struct DocumentFile {
     bitmaps: Vec<Arc<Bitmap>>,
     #[serde(default)]
     sounds: Vec<Arc<Sound>>,
+    #[serde(default)]
+    library_tree: Arc<LibraryTree>,
+    #[serde(default)]
+    document_class: String,
     #[serde(default = "first_id")]
     next_id: u64,
 }
@@ -1013,7 +1143,7 @@ impl From<DocumentFile> for Document {
         if let Some(tl) = f.timeline {
             scenes.insert(0, Arc::new(Scene { name: "Scene 1".into(), timeline: tl }));
         }
-        Document { stage: f.stage, scenes, library: f.library, bitmaps: f.bitmaps, sounds: f.sounds, next_id: f.next_id }
+        Document { stage: f.stage, scenes, library: f.library, bitmaps: f.bitmaps, sounds: f.sounds, library_tree: f.library_tree, document_class: f.document_class, next_id: f.next_id }
     }
 }
 
@@ -1021,18 +1151,22 @@ fn first_id() -> u64 {
     1
 }
 
+fn library_tree_is_empty(t: &Arc<LibraryTree>) -> bool {
+    t.is_empty()
+}
+
 /// What `timeline(i)` returns for a scene that does not exist (never for a sanitized document).
 static NO_TIMELINE: Timeline = Timeline { layers: Vec::new() };
 
 impl PartialEq for Document {
     fn eq(&self, o: &Document) -> bool {
-        self.stage == o.stage && self.next_id == o.next_id && arcs_eq(&self.scenes, &o.scenes) && arcs_eq(&self.library, &o.library) && arcs_eq(&self.bitmaps, &o.bitmaps) && arcs_eq(&self.sounds, &o.sounds)
+        self.stage == o.stage && self.next_id == o.next_id && self.document_class == o.document_class && arcs_eq(&self.scenes, &o.scenes) && arcs_eq(&self.library, &o.library) && arcs_eq(&self.bitmaps, &o.bitmaps) && arcs_eq(&self.sounds, &o.sounds) && arc_eq(&self.library_tree, &o.library_tree)
     }
 }
 
 impl Default for Document {
     fn default() -> Self {
-        let mut d = Document { stage: Stage::default(), scenes: vec![Arc::new(Scene::new("Scene 1"))], library: Vec::new(), bitmaps: Vec::new(), sounds: Vec::new(), next_id: 1 };
+        let mut d = Document { stage: Stage::default(), scenes: vec![Arc::new(Scene::new("Scene 1"))], library: Vec::new(), bitmaps: Vec::new(), sounds: Vec::new(), library_tree: Arc::default(), document_class: String::new(), next_id: 1 };
         let id = LayerId(d.alloc_id());
         d.timeline_mut(0).layers.push(Arc::new(Layer::new(id, "Layer 1")));
         d
@@ -1107,6 +1241,9 @@ impl Document {
         let mut max_id = 0u64;
         let scan = |l: &Layer, max_id: &mut u64| {
             *max_id = (*max_id).max(l.id.0);
+            for b in l.armature.iter().flat_map(|a| &a.bones) {
+                *max_id = (*max_id).max(b.id.0);
+            }
             for k in &l.keyframes {
                 for e in &k.elements {
                     *max_id = (*max_id).max(e.id.0);
@@ -1126,12 +1263,24 @@ impl Document {
                 Arc::make_mut(l).normalize();
                 sanitize_scripts(l);
                 sanitize_depth(l);
+                sanitize_armature(l);
                 scan(l, &mut max_id);
             }
             tl.repair_masks();
         }
+        // Script class names are text nothing runs yet; ones that aren't names are dropped.
+        if !self.document_class.is_empty() && !actions::valid_class_name(&self.document_class) {
+            self.document_class.clear();
+        }
         for sym in &mut self.library {
             max_id = max_id.max(sym.id.0);
+            if sym.linkage.as_ref().is_some_and(|l| l.check().is_err()) {
+                Arc::make_mut(sym).linkage = None;
+            }
+            // 9-slice guides that aren't usable are dropped: the symbol scales as a whole.
+            if sym.scale_grid.as_ref().is_some_and(|g| g.check().is_err()) {
+                Arc::make_mut(sym).scale_grid = None;
+            }
             let tl = &mut Arc::make_mut(sym).timeline;
             for l in &mut tl.layers {
                 Arc::make_mut(l).normalize();
@@ -1141,6 +1290,7 @@ impl Document {
                     Arc::make_mut(l).kind = LayerKind::Normal;
                 }
                 sanitize_depth(l);
+                sanitize_armature(l);
                 scan(l, &mut max_id);
             }
             tl.repair_masks();
@@ -1151,6 +1301,7 @@ impl Document {
         for s in &self.sounds {
             max_id = max_id.max(s.id.0);
         }
+        self.sanitize_library_tree(&mut max_id);
         self.next_id = self.next_id.max(max_id.saturating_add(1));
     }
 }
@@ -1163,14 +1314,40 @@ fn sanitize_depth(layer: &mut Arc<Layer>) {
     }
 }
 
+/// Repairs a loaded layer's armature (ADR 0043): only an armature layer has one, its bones are
+/// sane and ordered, and its keyframes' poses are finite. Touches only what needs it.
+fn sanitize_armature(layer: &mut Arc<Layer>) {
+    let is_armature = layer.kind == LayerKind::Armature;
+    // (A pose on another layer's keyframe, pasted from an armature, is kept and plays no part.)
+    if !is_armature {
+        if layer.armature.is_some() {
+            Arc::make_mut(layer).armature = None;
+        }
+        return;
+    }
+    if let Some(a) = &layer.armature {
+        let mut fixed = (**a).clone();
+        if fixed.sanitize() {
+            Arc::make_mut(layer).armature = Some(Arc::new(fixed));
+        }
+    }
+    let bad = |k: &Keyframe| {
+        let mut p = k.pose.clone();
+        p.sanitize()
+    };
+    if layer.keyframes.iter().any(|k| bad(k)) {
+        for k in &mut Arc::make_mut(layer).keyframes {
+            if bad(k) {
+                Arc::make_mut(k).pose.sanitize();
+            }
+        }
+    }
+}
+
 /// Repairs a loaded layer's frame scripts and instance event handlers (ADR 0024). Touches (and
 /// so un-shares) only keyframes that need it.
 fn sanitize_scripts(layer: &mut Arc<Layer>) {
-    let bad_script = |k: &Keyframe| match &k.script {
-        Some(FrameScript::Actions(a)) => a.is_empty() || actions::check_actions(a).is_err(),
-        Some(FrameScript::Plugin(p)) => p.check().is_err(),
-        None => false,
-    };
+    let bad_script = |k: &Keyframe| k.script.as_ref().is_some_and(FrameScript::needs_repair);
     let bad_events = |e: &Element| match &e.kind {
         ElementKind::Symbol { events, .. } => {
             events.len() > actions::MAX_HANDLERS || events.iter().enumerate().any(|(i, h)| events.iter().take(i).any(|o| o.event == h.event) || actions::check_actions(&h.actions).is_err())

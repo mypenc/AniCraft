@@ -18,7 +18,12 @@ pollster.workspace = true
 # Plain-old-data views of the upload buffers (already in the tree through wgpu and egui).
 bytemuck.workspace = true
 rayon.workspace = true
+web-time.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# The shaders' types, to keep them free of what a backend leaves undefined (wgpu's own naga).
+naga.workspace = true
 
 [lints]
 workspace = true

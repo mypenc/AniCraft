@@ -2,48 +2,72 @@
 //!
 //! ```text
 //! anicraft [file.anicraft] [--screenshot out.png] [--renderer wgpu|gl] [--open <panel>]
-//!          [--theme graphite|high-contrast] [--scale <percent>]
+//!          [--theme graphite|high-contrast] [--scale <percent>] [--lang <code>|auto|pseudo]
 //! anicraft --version
 //! ```
 //! `--screenshot` starts normally, draws ~120 frames, saves the window as PNG and exits.
+//!
+//! Built for `wasm32-unknown-unknown` the same program is the web editor (`src/web.rs`,
+//! ADR 0036, docs/web.md).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 // Release builds are Windows GUI programs, so no console window opens beside the app (the
 // packaging checks the PE subsystem, ADR 0026). Debug builds keep the console for logs; the
 // headless front end is anicraft-cli.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// The browser build leaves out what only the desktop has (screenshot runs, the recovery folder,
+// window chrome, `--open` panels); that code stays compiled for it but unused (ADR 0036).
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
+// First, so its `tr!` macros are in scope in every module after it.
+#[macro_use]
+mod i18n;
 mod a11y;
 mod actions_panel;
 mod app;
 mod autosave;
+mod brushtool;
+mod envelope;
+mod find_panel;
+mod erasertool;
+mod bone_tool;
 mod camera_tool;
+mod convert_symbol;
 mod dialogs;
 mod gpu_stage;
 mod icons;
 mod keymap;
+mod library;
 mod menus;
+mod mixed;
 mod motion_editor;
+mod movie_explorer;
 mod panels;
+mod motion_path;
+mod onion;
 mod pathtools;
 mod platform;
 mod plugins_ui;
 mod prefs;
+mod scale_grid;
 mod sound;
 mod shape_hints;
 mod stage;
 mod test_movie;
 mod theme;
 mod timeline;
+#[cfg(target_arch = "wasm32")]
+mod web;
 mod widthtool;
 
+#[cfg(not(target_arch = "wasm32"))]
 use anicraft_engine::Session;
 #[cfg(not(target_arch = "wasm32"))]
-use std::path::PathBuf;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The session to start with: the file given on the command line (through `file.open`, so
 /// `.fla` / `.xfl` import works the same as from the menu), else the sample. Also the import
 /// report of an Animate document, for the status bar.
+#[cfg(not(target_arch = "wasm32"))]
 fn open_session(file: Option<&Path>) -> (Session, Option<String>) {
     let Some(p) = file else { return (Session::new(anicraft_engine::doc::sample::demo()), None) };
     let mut s = Session::default();
@@ -64,10 +88,13 @@ fn open_session(file: Option<&Path>) -> (Session, Option<String>) {
 
 /// `--theme` / `--scale`: the look for this run only (screenshots of high contrast or 200 %),
 /// over the saved preferences, without saving them.
-#[derive(Clone, Copy, Default)]
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Default)]
 struct Look {
     theme: Option<theme::Palette>,
     scale: Option<f32>,
+    /// `--lang`: a locale code, `auto` or `pseudo` (ADR 0040).
+    lang: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -80,6 +107,8 @@ fn run(renderer: eframe::Renderer, file: Option<&Path>, shot: Option<PathBuf>, o
     // The embedded interface font joins the text library before anything lays text out:
     // opening an Animate document from the command line lays its text out right here.
     anicraft_engine::text::Fonts::register(theme::embedded_fonts());
+    // `--lang` before the window exists, so its first status line is in that language too.
+    i18n::force(look.lang.as_deref());
     let (session, report) = open_session(file);
     eframe::run_native(
         "AniCraft",
@@ -90,11 +119,18 @@ fn run(renderer: eframe::Renderer, file: Option<&Path>, shot: Option<PathBuf>, o
             a.open_panel(open.as_deref());
             // An imported document says what came across, as opening it from the menu does.
             if let Some(r) = report {
-                a.status_ok(format!("{r} Save to keep it as an AniCraft document."));
+                a.status_ok(tr!("{report} Save to keep it as an AniCraft document.", report = r));
             }
             Ok(Box::new(a))
         }),
     )
+}
+
+/// In the browser the page's script calls this once the module is loaded: the editor starts on
+/// the page's canvas.
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    web::start();
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -131,19 +167,28 @@ fn main() -> eframe::Result {
                     std::process::exit(2);
                 }
             },
+            "--lang" => match args.next() {
+                Some(code) if i18n::known(&code) => look.lang = Some(code),
+                other => {
+                    let offered: Vec<&str> = i18n::offered().into_iter().map(|(c, _)| c).collect();
+                    eprintln!("--lang takes auto, pseudo or a language this build has ({}), not {}", offered.join(", "), other.as_deref().unwrap_or("nothing"));
+                    std::process::exit(2);
+                }
+            },
             // Printed by the release packaging checks and for bug reports.
             "--version" | "-V" => {
                 println!("AniCraft {} ({})", env!("CARGO_PKG_VERSION"), app::RELEASE_STAGE);
                 return Ok(());
             }
             "--help" | "-h" => {
-                println!(
-                    "anicraft [file.anicraft|file.fla|file.xfl] [--version] [--screenshot out.png] [--renderer wgpu|gl] [--theme graphite|high-contrast] [--scale <percent>] [--open palette|shortcuts|lastscene|select|about|files|confirm|transform|points|pen|frames|span|bucket|tlzoom|tlwide|motion|motionspan|hints|hintsend|camera|cameraview|filters|prefs|licenses|zoom|recovery|plugins|actions|testmovie|exporthtml]\n\
+                println!( // i18n-exempt: the --help console text
+                    "anicraft [file.anicraft|file.fla|file.xfl] [--version] [--screenshot out.png] [--renderer wgpu|gl] [--theme graphite|high-contrast] [--scale <percent>] [--lang <code>|auto|pseudo] [--open palette|shortcuts|lastscene|select|about|files|confirm|transform|points|merge|rawparts|rawedit|rawsub|rawpoints|rawsnap|symboledit|nineslice|nineslicedit|brush|brushing|eraser|erasing|eyedropper|pen|frames|span|bucket|tlzoom|tlwide|motion|motionspan|motionpath|motionpoints|motionedit|motionpins|motionpinsspan|hints|hintsend|camera|cameraview|filters|strokes|prefs|licenses|zoom|recovery|plugins|actions|script|scriptproblems|testmovie|testscript|exporthtml|sound|envelope|library|librarymenu|colour]\n\
                      --renderer   force the GPU backend (also ANICRAFT_RENDERER); default wgpu, falling back to OpenGL\n\
                      --open       shows a panel at start (handy with --screenshot for visual checks)\n\
-                     ANICRAFT_STAGE_RENDERER=gpu|cpu  stage renderer, in builds with the gpu-stage feature (ADR 0019)\n\
+                     ANICRAFT_STAGE_RENDERER=gpu|cpu  stage renderer (default gpu, falling back to cpu; ADR 0032)\n\
                      --theme      the interface palette for this run (not saved)\n\
                      --scale      the interface scale for this run, 75 to 200 (not saved)\n\
+                     --lang       the interface language for this run (not saved); pseudo tests the layout\n\
                      Headless use: anicraft-cli --help"
                 );
                 return Ok(());
@@ -156,38 +201,12 @@ fn main() -> eframe::Result {
     // on some Linux setups) retry once with OpenGL, unless the user forced a backend.
     let forced = platform::forced_renderer(renderer_arg.as_deref());
     let first = forced.unwrap_or(eframe::Renderer::Wgpu);
-    match run(first, file.as_deref(), shot.clone(), open.clone(), look) {
+    match run(first, file.as_deref(), shot.clone(), open.clone(), look.clone()) {
         Err(e) if forced.is_none() && first == eframe::Renderer::Wgpu => {
             eprintln!("GPU backend (wgpu) failed to start: {e}. Retrying with OpenGL.");
             run(eframe::Renderer::Glow, file.as_deref(), shot, open, look)
         }
         other => other,
-    }
-}
-
-/// Browser entry point: runs the app in the canvas `anicraft_canvas` of index.html.
-#[cfg(target_arch = "wasm32")]
-fn main() {
-    use eframe::wasm_bindgen::JsCast as _;
-    wasm_bindgen_futures::spawn_local(async {
-        let canvas = web_sys_canvas();
-        let Some(canvas) = canvas else { return };
-        let (session, _) = open_session(None);
-        let _ = eframe::WebRunner::new()
-            .start(
-                canvas,
-                eframe::WebOptions::default(),
-                Box::new(move |cc| {
-                    let a = app::App::new(cc, session, None);
-                    Ok(Box::new(a))
-                }),
-            )
-            .await;
-    });
-
-    fn web_sys_canvas() -> Option<eframe::web_sys::HtmlCanvasElement> {
-        let doc = eframe::web_sys::window()?.document()?;
-        doc.get_element_by_id("anicraft_canvas")?.dyn_into::<eframe::web_sys::HtmlCanvasElement>().ok()
     }
 }
 

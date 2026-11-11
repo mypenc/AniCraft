@@ -1,7 +1,7 @@
 use super::*;
 use anicraft_doc::actions::{ButtonEvent, EventHandler, PluginScript, Property, Target};
 use anicraft_doc::player::{Event, NoScripts, PlayerState, start, step};
-use anicraft_doc::{ElementId, GradientStop, Keyframe, LayerId, LoopMode, Scene, Shape, Symbol, Tween, evaluate_player, sample};
+use anicraft_doc::{ColorEffect, ColorTransform, ElementId, GradientStop, Keyframe, LayerId, LoopMode, Scene, Shape, Symbol, Tween, evaluate_player, sample};
 use anicraft_geom::Vec2;
 use boa_engine::{Context, Source};
 
@@ -36,7 +36,7 @@ fn layer(id: u64, keys: Vec<Arc<Keyframe>>) -> Arc<Layer> {
 }
 
 fn symbol(id: u64, kind: SymbolKind, layers: Vec<Arc<Layer>>) -> Arc<Symbol> {
-    Arc::new(Symbol { id: SymbolId(id), name: format!("S{id}"), kind, timeline: Timeline { layers } })
+    Arc::new(Symbol { id: SymbolId(id), name: format!("S{id}"), kind, linkage: None, scale_grid: None, timeline: Timeline { layers } })
 }
 
 fn this() -> Target {
@@ -65,7 +65,7 @@ fn fixture() -> Document {
     let knob = symbol(200, SymbolKind::Button, vec![layer(201, vec![kf(0, 1, vec![rect(2001, -20.0, -20.0, 40.0, 40.0, 0x3d8bfd)], vec![], ""), kf(1, 1, vec![rect(2002, -20.0, -20.0, 40.0, 40.0, 0x6aa8ff)], vec![], ""), kf(2, 1, vec![rect(2003, -20.0, -20.0, 40.0, 40.0, 0x2a64c0)], vec![], ""), kf(3, 1, vec![rect(2004, -25.0, -25.0, 50.0, 50.0, 0)], vec![], "")])]);
     // A looping three-frame graphic.
     let mut red = (*rect(3001, 0.0, 0.0, 30.0, 30.0, 0xff0000)).clone();
-    red.color = ColorEffect { alpha: 0.8, tint: Rgba::hex(0xffffff), tint_amount: 0.2 };
+    red.color = ColorEffect::Brightness(0.2).with_alpha(0.8);
     let blink = symbol(300, SymbolKind::Graphic, vec![layer(301, vec![kf(0, 1, vec![Arc::new(red)], vec![], ""), kf(1, 1, vec![rect(3002, 0.0, 0.0, 30.0, 30.0, 0x00ff00)], vec![], ""), kf(2, 1, vec![rect(3003, 0.0, 0.0, 30.0, 30.0, 0x0000ff)], vec![], "")])]);
     // A panel clip holding its own door (panel.door), that plays on and talks to its parent.
     let panel = symbol(400, SymbolKind::MovieClip, vec![
@@ -83,12 +83,13 @@ fn fixture() -> Document {
         on(ButtonEvent::Release, vec![Action::GotoAndStop { target: Target::new("panel"), frame: FrameRef::Number(99), scene: None }]),
     ];
     let mut faded = (*inst(5003, 300, "", Affine::translate(500.0, 40.0), vec![])).clone();
-    faded.color = ColorEffect { alpha: 0.5, tint: Rgba::hex(0x00ffff), tint_amount: 0.6 };
+    // Advanced, with an alpha offset (it stays on each item: no group fade).
+    faded.color = ColorEffect::Advanced(ColorTransform { mul: [0.4, 0.4, 0.4, 0.5], add: [0.0, 0.6, 0.6, 0.1] });
     let gradient = Arc::new(Element {
         id: ElementId(5004),
         name: String::new(),
         transform: Affine::translate(20.0, 300.0),
-        color: ColorEffect { alpha: 1.0, tint: Rgba::hex(0xff00ff), tint_amount: 0.25 },
+        color: ColorEffect::Tint { color: Rgba::hex(0xff00ff), amount: 0.25 },
         kind: ElementKind::Shape(Shape::filled(Path::rect(0.0, 0.0, 100.0, 40.0), Paint::Linear { start: Vec2::new(0.0, 0.0), end: Vec2::new(100.0, 0.0), stops: vec![GradientStop { offset: 0.0, color: Rgba::hex(0xffffff) }, GradientStop { offset: 1.0, color: Rgba::hex(0x000000) }] }).with_stroke(Rgba::hex(0xffff00), 2.0)),
     });
     let mut mask = Layer::new(LayerId(6), "mask");
@@ -186,6 +187,8 @@ fn js_events(events: &[Event]) -> String {
             Event::Down(p) => json!({"type": "down", "x": p.x, "y": p.y}),
             Event::Up(p) => json!({"type": "up", "x": p.x, "y": p.y}),
             Event::Leave => json!({"type": "leave"}),
+            Event::KeyDown(k) => json!({"type": "keydown", "code": k}),
+            Event::KeyUp(k) => json!({"type": "keyup", "code": k}),
         })
         .collect();
     Value::Array(list).to_string()
@@ -200,8 +203,23 @@ fn snapshot(st: &PlayerState) -> Value {
     json!({
         "scene": st.scene, "frame": st.root.frame, "playing": st.root.playing,
         "clips": st.clips.iter().map(|(p, c)| json!([ids(p), c.frame, c.playing])).collect::<Vec<_>>(),
+        "listeners": st.listeners.iter().filter(|(_, l)| !l.is_empty()).map(|(p, l)| json!([ids(p), l.iter().map(|x| json!([x.event.key(), ids(&x.owner), x.function])).collect::<Vec<_>>()])).collect::<Vec<_>>(),
+        "stage": st.stage.iter().map(|x| json!([x.event.key(), ids(&x.owner), x.function])).collect::<Vec<_>>(),
+        "vars": st.vars.iter().map(|(p, v)| json!([ids(p), v.iter().map(|(k, v)| json!([k, format!("{}:{}", kind(v), v.text())])).collect::<Vec<_>>()])).collect::<Vec<_>>(),
         "hover": st.hover.as_deref().map(ids), "pressed": st.pressed.as_deref().map(ids), "down": st.down,
     })
+}
+
+/// A script value's kind, as the JS snapshot tags it.
+fn kind(v: &anicraft_doc::actions::as3::ir::Value) -> &'static str {
+    use anicraft_doc::actions::as3::ir::Value as V;
+    match v {
+        V::Undefined => "u",
+        V::Null => "null",
+        V::Bool(_) => "b",
+        V::Num(_) => "n",
+        V::Str(_) => "s",
+    }
 }
 
 fn props_of_rust(st: &PlayerState) -> Vec<String> {
@@ -261,7 +279,7 @@ fn same_display_list(js: &mut Js, m: &Movie, doc: &Document, st: &PlayerState, w
         }
         assert_eq!(a["s"].is_array(), b.stroke.is_some(), "{when}: item {k} stroke");
         let c = &a["c"];
-        for (i, y) in [b.color.alpha, b.color.tint.r, b.color.tint.g, b.color.tint.b, b.color.tint_amount].into_iter().enumerate() {
+        for (i, y) in b.color.mul.into_iter().chain(b.color.add).enumerate() {
             assert!(close(c[i].as_f64().unwrap(), y, 1e-3), "{when}: item {k} colour effect {c} vs {:?}", b.color);
         }
         let idx = |v: &Value| v.as_u64().map(|x| x as u32);
@@ -446,7 +464,7 @@ fn frames_are_baked_and_stored_once() {
     assert!(m.stats.paths < 40, "{:?}", m.stats);
     // Unused library symbols stay out.
     let mut d = doc.clone();
-    d.library.push(Arc::new(Symbol { id: SymbolId(999_999), name: "unused".into(), kind: SymbolKind::Graphic, timeline: Timeline::default() }));
+    d.library.push(Arc::new(Symbol { id: SymbolId(999_999), name: "unused".into(), kind: SymbolKind::Graphic, linkage: None, scale_grid: None, timeline: Timeline::default() }));
     assert_eq!(movie(&d, &HtmlOptions::default()).json["symbols"], m.json["symbols"]);
 }
 
@@ -454,7 +472,7 @@ fn frames_are_baked_and_stored_once() {
 fn variable_width_strokes_become_filled_outlines() {
     use anicraft_doc::{ProfilePreset, Stroke};
     let mut doc = Document::default();
-    let shape = Shape { path: Arc::new(Path::line(Vec2::new(10.0, 10.0), Vec2::new(200.0, 10.0))), fill: None, stroke: Some(Stroke::new(Rgba::hex(0x00ff00), 10.0).with_profile(ProfilePreset::TaperEnd.profile())), fill_rule: FillRule::NonZero };
+    let shape = Shape { path: Arc::new(Path::line(Vec2::new(10.0, 10.0), Vec2::new(200.0, 10.0))), fill: None, stroke: Some(Stroke::new(Rgba::hex(0x00ff00), 10.0).with_profile(ProfilePreset::TaperEnd.profile())), fill_rule: FillRule::NonZero, merge: false };
     let el = Element { id: ElementId(77), name: String::new(), transform: Affine::translate(5.0, 0.0), color: Default::default(), kind: ElementKind::Shape(shape) };
     Arc::make_mut(&mut doc.timeline_mut(0).layers[0]).keyframe_mut(0).unwrap().elements.push(Arc::new(el));
     let m = movie(&doc, &HtmlOptions::default());
@@ -462,6 +480,33 @@ fn variable_width_strokes_become_filled_outlines() {
     assert_eq!(items.as_array().unwrap().len(), 1);
     assert!(items[0]["f"].is_u64() && items[0]["s"].is_null(), "{items}");
     assert!(items[0]["m"].is_null(), "the outline is already in place");
+}
+
+#[test]
+fn stroke_caps_joins_and_dashes_reach_the_page() {
+    use anicraft_doc::{Cap, Dash, Join, Stroke, StrokeStyle};
+    let mut doc = Document::default();
+    let style = StrokeStyle { cap: Cap::Butt, join: Join::Miter, miter_limit: 6.0, dash: Some(Dash::Dashed { lengths: vec![4.0, 1.5].into(), offset: 1.0 }) };
+    let line = |y: f32, st: Stroke| Shape { path: Arc::new(Path::line(Vec2::new(10.0, y), Vec2::new(200.0, y))), fill: None, stroke: Some(st), fill_rule: FillRule::NonZero, merge: false };
+    let shapes = [line(10.0, Stroke::new(Rgba::BLACK, 3.0)), line(30.0, Stroke::new(Rgba::BLACK, 3.0).with_style(style)), line(50.0, Stroke::new(Rgba::BLACK, 3.0).with_style(StrokeStyle { dash: Dash::dotted(2.0), ..StrokeStyle::default() }))];
+    for (i, sh) in shapes.into_iter().enumerate() {
+        let el = Element { id: ElementId(70 + i as u64), name: String::new(), transform: Affine::scale(2.0, 2.0), color: Default::default(), kind: ElementKind::Shape(sh) };
+        Arc::make_mut(&mut doc.timeline_mut(0).layers[0]).keyframe_mut(0).unwrap().elements.push(Arc::new(el));
+    }
+    let m = movie(&doc, &HtmlOptions::default());
+    let items = &m.json["contents"][0]["l"][0]["e"];
+    // Round and solid: no style entry, as before.
+    assert!(items[0]["s"].is_array() && items[0].get("k").is_none(), "{items}");
+    // Lengths stay in local units; the page scales them like the width.
+    assert_eq!(items[1]["k"], json!({"c": "butt", "j": "miter", "ml": 6, "d": [4, 1.5], "o": 1}));
+    assert_eq!(items[2]["k"], json!({"c": "round", "j": "round", "ml": 3, "d": [0, 5], "o": 0}), "dots are round zero-length dashes");
+    // The player hands the style to the page with each item.
+    let mut js = Js::new(&m);
+    js.eval("P.start()");
+    let ours = js.eval("P.evaluate()");
+    let theirs = ours["items"].as_array().unwrap();
+    assert!(theirs[0]["k"].is_null());
+    assert_eq!(theirs[1]["k"], items[1]["k"]);
 }
 
 #[test]
@@ -475,8 +520,18 @@ fn what_does_not_carry_across_is_reported() {
         *blend = BlendMode::Subtract;
     }
     Arc::make_mut(&mut tl.layers[0]).keyframe_mut(1).unwrap().script = Some(FrameScript::Plugin(PluginScript { id: "org.example.menu".into(), entry: "main".into() }));
+    // A 9-slice symbol, scaled: the page scales it as a whole (ADR 0055).
+    let ElementKind::Symbol { symbol: sym, .. } = doc.timeline(0).layers[2].keyframes[0].elements[0].kind else { panic!("the fixture's third layer holds an instance") };
+    if let Some(x) = doc.library.iter_mut().find(|x| x.id == sym) {
+        Arc::make_mut(x).scale_grid = Some(anicraft_doc::ScaleGrid { left: 1.0, right: 2.0, top: 1.0, bottom: 2.0 });
+    }
+    let m = movie(&doc, &HtmlOptions::default());
+    assert_eq!(m.report.get(NINE_SLICE), None, "unscaled instances draw the same either way");
+    let tl = doc.timeline_mut(0);
+    Arc::make_mut(&mut Arc::make_mut(&mut tl.layers[2]).keyframe_mut(0).unwrap().elements[0]).transform = Affine::scale(2.0, 1.0);
     let m = movie(&doc, &HtmlOptions::default());
     assert_eq!(m.report.get(FILTERS), Some(&1));
+    assert_eq!(m.report.get(NINE_SLICE), Some(&1));
     assert_eq!(m.report.get(BLENDS), Some(&1));
     assert_eq!(m.report.get(PLUGIN_SCRIPTS), Some(&1));
     // The player says so when the frame script's keyframe is entered.
@@ -517,21 +572,76 @@ fn bitmaps_and_sounds_are_embedded_once() {
     assert_eq!(m.json["timelines"][0]["snd"]["0"], json!([[0, "event", 1, false, 1]]));
     // The player hands the frame's sounds to the page.
     let mut js = Js::new(&m);
-    assert_eq!(js.eval("P.start().sounds"), json!([[0, "event", 1, false, 1]]));
+    assert_eq!(js.eval("P.start().sounds"), json!([[0, "event", 1, false, 1, 1, null]]));
     let silent = movie(&doc, &HtmlOptions { sound: false, ..Default::default() });
     assert_eq!((silent.stats.sounds, silent.json["timelines"][0].get("snd")), (0, None));
+    // A bitmap without Allow Smoothing says so; the page draws it with hard pixel edges, and
+    // an SVG frame marks its image pixelated (ADR 0050).
+    if let Some(b) = doc.bitmaps.first_mut() {
+        Arc::make_mut(b).smoothing = false;
+    }
+    let hard = movie(&doc, &HtmlOptions::default());
+    assert_eq!(hard.json["paints"][0], json!({"b": 0, "rep": true, "m": [2, 0, 0, 2, 0, 0], "px": true}));
+    let svg = crate::svg::to_svg(&anicraft_doc::evaluate(&doc, 0), &doc.stage);
+    assert!(svg.contains("image-rendering=\"pixelated\""), "{svg}");
+}
+
+#[test]
+fn sounds_carry_their_envelopes_and_volumes_and_start_in_graphics_and_clips_as_in_the_player() {
+    use anicraft_doc::{FrameSound, Keyframe, Layer, LayerId, SoundEffect, SoundId, SoundSync, Symbol, SymbolId, SymbolKind, Timeline};
+    let mut doc = Document::default();
+    doc.stage.fps = 8.0;
+    let wav = anicraft_doc::audio::wav::encode(8000, 1, &[0.25; 4000], anicraft_doc::audio::wav::Bits::Int16);
+    doc.sounds.push(Arc::new(anicraft_doc::Sound::from_data(SoundId(60), "beep", wav).unwrap()));
+    let snd = |sync, effect| Some(FrameSound { sync, effect, ..FrameSound::new(SoundId(60)) });
+    let key = |start, n, sound: Option<FrameSound>, elements: Vec<Arc<Element>>| {
+        let mut k = Keyframe::new(start, n);
+        k.sound = sound;
+        k.elements = elements;
+        Arc::new(k)
+    };
+    let layer = |id, keys, volume| {
+        let mut l = Layer::new(LayerId(id), "L");
+        l.keyframes = keys;
+        l.volume = volume;
+        Arc::new(l)
+    };
+    let inst = |id, symbol| Arc::new(Element { id: ElementId(id), name: String::new(), transform: Affine::IDENTITY, color: Default::default(), kind: ElementKind::Symbol { symbol: SymbolId(symbol), loop_mode: Default::default(), first_frame: 0, blend: Default::default(), filters: Vec::new(), events: Vec::new() } });
+    // A graphic with a fading sound on its frame 1 (of 2), a clip with a left-channel one on its
+    // frame 0 (of 3), both on a layer at half volume; a sound of the main timeline's own.
+    doc.library.push(Arc::new(Symbol { linkage: None, scale_grid: None, id: SymbolId(20), name: "g".into(), kind: SymbolKind::Graphic, timeline: Timeline { layers: vec![layer(21, vec![key(0, 1, None, vec![]), key(1, 1, snd(SoundSync::Event, SoundEffect::FadeOut), vec![])], 1.0)] } }));
+    doc.library.push(Arc::new(Symbol { linkage: None, scale_grid: None, id: SymbolId(30), name: "c".into(), kind: SymbolKind::MovieClip, timeline: Timeline { layers: vec![layer(31, vec![key(0, 3, snd(SoundSync::Stream, SoundEffect::LeftChannel), vec![])], 0.5)] } }));
+    doc.timeline_mut(0).layers = vec![layer(1, vec![key(0, 6, snd(SoundSync::Event, SoundEffect::None), vec![])], 1.0), layer(2, vec![key(0, 6, None, vec![inst(40, 20), inst(41, 30)])], 0.5)];
+    let m = movie(&doc, &HtmlOptions::default());
+    // The fade's points span one play (half a second); the clip's span its 3 frames.
+    let g_tl = m.json["symbols"].as_array().unwrap().iter().find(|s| s["name"] == "g").unwrap()["tl"].as_u64().unwrap() as usize;
+    assert_eq!(m.json["timelines"][g_tl]["snd"]["1"], json!([[0, "event", 1, false, 1, 1, [[0, 1, 1], [0.5, 0, 0]]]]));
+    let c_tl = m.json["symbols"].as_array().unwrap().iter().find(|s| s["name"] == "c").unwrap()["tl"].as_u64().unwrap() as usize;
+    assert_eq!(m.json["timelines"][c_tl]["snd"]["0"], json!([[0, "stream", 1, false, 3, 0.5, [[0, 1, 0]]]]));
+    // Frame by frame, the page starts what the Rust player starts, at the same volumes.
+    let mut js = Js::new(&m);
+    let mut r = anicraft_doc::player::start(&doc, &mut NoScripts);
+    let mut ours = js.eval("P.start().sounds");
+    for step in 0..6 {
+        let theirs: Vec<Value> = r.sounds.iter().map(|s| json!([s.sound.sound.0 - 60, s.sound.sync.key(), f64::from(s.gain)])).collect();
+        let page: Vec<Value> = ours.as_array().unwrap().iter().map(|s| json!([s[0], s[1], s[5].as_f64()])).collect();
+        assert_eq!(page, theirs, "step {step}");
+        r = anicraft_doc::player::step(&doc, &r.state, &[], &mut NoScripts);
+        ours = js.eval("P.step([]).sounds");
+    }
 }
 
 #[test]
 fn hostile_documents_export_without_panicking() {
     let mut doc = Document::default();
-    let bad = Element { id: ElementId(5), name: "x".into(), transform: Affine { m: [f32::NAN, 0.0, 0.0, 1.0, f32::INFINITY, 0.0] }, color: ColorEffect { alpha: f32::NAN, tint: Rgba::new(f32::NAN, 2.0, -1.0, 1.0), tint_amount: f32::INFINITY }, kind: ElementKind::Shape(Shape::filled(Path::rect(0.0, 0.0, f32::NAN, 1.0), Paint::Radial { center: Vec2::ZERO, radius: -5.0, stops: vec![GradientStop { offset: f32::NAN, color: Rgba::BLACK }] })) };
+    let bad = Element { id: ElementId(5), name: "x".into(), transform: Affine { m: [f32::NAN, 0.0, 0.0, 1.0, f32::INFINITY, 0.0] }, color: ColorEffect::Advanced(ColorTransform { mul: [f32::NAN, 2.0, -1.0, f32::INFINITY], add: [f32::NAN, 0.0, 0.0, 0.0] }), kind: ElementKind::Shape(Shape::filled(Path::rect(0.0, 0.0, f32::NAN, 1.0), Paint::Radial { center: Vec2::ZERO, radius: -5.0, stops: vec![GradientStop { offset: f32::NAN, color: Rgba::BLACK }] })) };
     let fine = Element { id: ElementId(6), transform: Affine::IDENTITY, ..bad.clone() };
     let missing = inst(7, 12345, "ghost", Affine::IDENTITY, vec![]);
     Arc::make_mut(&mut doc.timeline_mut(0).layers[0]).keyframe_mut(0).unwrap().elements = vec![Arc::new(bad), Arc::new(fine), missing];
-    let e = to_html(&doc, &HtmlOptions::default()).unwrap();
-    assert!(!e.html.contains("NaN") && !e.html.contains("inf"), "numbers stay finite");
+    to_html(&doc, &HtmlOptions::default()).unwrap();
     let m = movie(&doc, &HtmlOptions::default());
+    let data = m.json.to_string();
+    assert!(!data.contains("NaN") && !data.contains("inf") && !data.contains("null,"), "numbers stay finite: {data}");
     assert_eq!(m.json["paths"][0], "", "a path with a NaN point is left empty");
     let mut js = Js::new(&m);
     js.eval("P.start()");
@@ -539,4 +649,170 @@ fn hostile_documents_export_without_panicking() {
     // An empty document is a one-frame movie.
     let m = movie(&Document::default(), &HtmlOptions::default());
     assert_eq!(m.json["timelines"][0]["n"], 1);
+}
+
+/// `k` with a kept ActionScript 3.0 script in place of its actions.
+fn as3(k: &mut Arc<Keyframe>, src: &str) {
+    Arc::make_mut(k).script = Some(FrameScript::Source(Arc::new(anicraft_doc::actions::SourceScript::new(anicraft_doc::actions::Language::ActionScript3, src))));
+}
+
+/// The fixture with its frame actions and the knob's handlers written as ActionScript: the
+/// main timeline's first frame adds the knob's listeners (named and inline functions,
+/// `currentTarget`), a listener makes the panel clip clickable, one names an instance that
+/// isn't there, the door's last frame calls `nextScene()` in its own script, and a script
+/// outside the subset stays kept and unrun.
+fn scripted() -> Document {
+    let mut d = fixture();
+    let main = "import flash.events.MouseEvent;\n\
+        trace(\"start\");\n\
+        knob.addEventListener(MouseEvent.CLICK, openDoor);\n\
+        knob.addEventListener(MouseEvent.ROLL_OVER, function (e:MouseEvent):void { door.alpha = 0.5; });\n\
+        knob.addEventListener(MouseEvent.ROLL_OUT, function (e:MouseEvent):void { door.alpha = 1; });\n\
+        knob.addEventListener(MouseEvent.MOUSE_DOWN, pressed);\n\
+        knob.addEventListener(MouseEvent.MOUSE_UP, released);\n\
+        panel.addEventListener(MouseEvent.CLICK, function (e:MouseEvent):void { trace(\"panel \" + 1); MovieClip(e.currentTarget).gotoAndStop(1); e.currentTarget.alpha = 0.75; });\n\
+        ghost.addEventListener(MouseEvent.CLICK, pressed);\n\
+        navigateToURL(new URLRequest(\"https://example.com\"));\n\
+        function openDoor(e:MouseEvent):void { door.gotoAndPlay(\"opening\"); panel.door.play(); }\n\
+        function pressed(e:MouseEvent):void { trace(\"pressed\"); }\n\
+        function released(e:MouseEvent):void { MovieClip(root).panel.gotoAndStop(100); }";
+    let tl = d.timeline_mut(0);
+    let l1 = Arc::make_mut(&mut tl.layers[0]);
+    as3(&mut l1.keyframes[0], main);
+    as3(&mut l1.keyframes[1], "ghost.stop()\npanel.stop()");
+    as3(&mut l1.keyframes[2], "var n:int = 3; stop(); switch (n) { }");
+    let l2 = Arc::make_mut(&mut tl.layers[1]);
+    if let ElementKind::Symbol { events, .. } = &mut Arc::make_mut(&mut Arc::make_mut(&mut l2.keyframes[0]).elements[0]).kind {
+        events.clear();
+    }
+    let door = Arc::make_mut(&mut d.library[0]);
+    let dl = Arc::make_mut(&mut door.timeline.layers[0]);
+    as3(&mut dl.keyframes[2], "stop();\ntrace('door open');\nnextScene();");
+    d
+}
+
+#[test]
+fn the_js_player_runs_actionscript_like_the_rust_player() {
+    let doc = scripted();
+    let m = movie(&doc, &HtmlOptions::default());
+    assert_eq!(m.report.get(KEPT_SCRIPTS), Some(&1), "{:?}", m.report);
+    assert_eq!(m.report.get(OUTSIDE_CALLS), Some(&1), "{:?}", m.report);
+    let none = || (vec![], vec![]);
+    let mut script: Vec<(Vec<Event>, Vec<Event>)> = (0..2).map(|_| none()).collect();
+    script.push((vec![Event::Move(at(100.0, 100.0))], vec![]));
+    script.push((vec![Event::Down(at(101.0, 99.0))], vec![]));
+    script.push((vec![], vec![Event::Up(at(102.0, 101.0))]));
+    script.extend((0..6).map(|_| none()));
+    // Click the panel (a movie clip that a listener made clickable).
+    script.push((vec![Event::Move(at(380.0, 300.0))], vec![Event::Down(at(380.0, 300.0)), Event::Up(at(380.0, 300.0))]));
+    script.push((vec![Event::Move(at(10.0, 10.0)), Event::Leave], vec![]));
+    script.extend((0..30).map(|_| none()));
+    let lines = compare(&doc, &script);
+    for want in ["start", "pressed", "door open", "panel 1", "Listen for click (ghost): no instance named “ghost” here", "Stop (ghost): no instance named “ghost” here", "Next scene: a movie clip's timeline has one scene; call it in the main timeline's script"] {
+        assert!(lines.iter().any(|l| l == want), "the scripted fixture never wrote {want:?}: {lines:?}");
+    }
+}
+
+#[test]
+fn actionscript_plays_the_movie_its_hand_made_actions_play() {
+    // The scripted fixture and the fixture write the same lines and reach the same states, but
+    // for the lines only scripts write and the listeners they hold.
+    let (a, b) = (fixture(), scripted());
+    let events = [vec![], vec![], vec![Event::Move(at(100.0, 100.0))], vec![Event::Down(at(101.0, 99.0))], vec![Event::Up(at(102.0, 101.0))], vec![], vec![], vec![], vec![Event::Move(at(10.0, 10.0))]];
+    let (mut x, mut y) = (start(&a, &mut NoScripts), start(&b, &mut NoScripts));
+    let only_scripts = |l: &String| l.starts_with("Listen for") || l.starts_with("Next scene:");
+    for (i, ev) in events.iter().enumerate() {
+        x = step(&a, &x.state, ev, &mut NoScripts);
+        y = step(&b, &y.state, ev, &mut NoScripts);
+        let ys: Vec<&String> = y.output.iter().filter(|l| !only_scripts(l)).collect();
+        assert_eq!(x.output.iter().collect::<Vec<_>>(), ys, "step {}: output", i + 1);
+        let mut st = y.state.clone();
+        st.listeners.clear();
+        st.seq = 0;
+        assert_eq!(x.state, st, "step {}: state", i + 1);
+    }
+}
+
+/// A movie that uses the small-logic tier (ADR 0052): typed variables kept per
+/// timeline and per clip instance, expressions, `if`, loops, `Math.random()`, functions from
+/// another frame, property reads, enter-frame and keyboard listeners that add and remove
+/// themselves, `e.target`, a runtime error and a loop that runs out of fuel.
+fn logic() -> Document {
+    let mut d = fixture();
+    let main = "import flash.events.*;\n\
+        var score:int = 0;\n\
+        var label:String = \"go\";\n\
+        var ticks:uint;\n\
+        var total:Number = 0;\n\
+        trace(\"start \" + score + \" \" + label + \" \" + ticks + \" \" + currentFrame + \"/\" + totalFrames + \" \" + currentLabel);\n\
+        for (var i:int = 0; i < 5; i++) { if (i % 2 == 0) continue; total += i * 1.5; }\n\
+        var k:int = 3; while (k > 0) { k--; } do { k += 2; } while (k < 5);\n\
+        trace(total, k, Math.max(1, 7, 3), Math.min(), Math.round(-2.5), Math.abs(-0.25), int(\"42\") + uint(-1), 7 / 2, \"10\" < \"9\", 1 == \"1\", null == undefined);\n\
+        trace(Math.floor(Math.random() * 100), Math.random() < 1, knob.x, knob.y, knob.alpha, knob.visible, knob.name, panel.currentFrame, panel.totalFrames);\n\
+        addEventListener(Event.ENTER_FRAME, onTick);\n\
+        stage.addEventListener(KeyboardEvent.KEY_DOWN, onKey);\n\
+        stage.addEventListener(KeyboardEvent.KEY_UP, function (e:KeyboardEvent):void { trace(\"up \" + e.keyCode + \" \" + (e.currentTarget == stage)); });\n\
+        knob.addEventListener(MouseEvent.CLICK, function (e:MouseEvent):void { score += 10; trace(\"click \" + e.target.name + \" \" + (e.currentTarget == knob) + \" \" + score); door.x = door.x + 0.1; trace(door.x); });\n\
+        function onTick(e:Event):void {\n\
+          ticks++;\n\
+          if (ticks % 4 == 0) trace(\"tick \" + ticks + \" frame \" + currentFrame + \" mouse \" + mouseX + \",\" + mouseY);\n\
+          if (ticks >= 12) { removeEventListener(Event.ENTER_FRAME, onTick); trace(\"stopped ticking\"); }\n\
+        }\n\
+        function onKey(e:KeyboardEvent):void {\n\
+          if (e.keyCode == Keyboard.RIGHT) { knob.x += 5; } else if (e.keyCode == Keyboard.SPACE) { trace(\"space \" + bump(2)); } else { trace(\"key \" + e.keyCode); }\n\
+          trace(\"knob at \" + knob.x + \" \" + label);\n\
+        }";
+    let tl = d.timeline_mut(0);
+    let l1 = Arc::make_mut(&mut tl.layers[0]);
+    as3(&mut l1.keyframes[0], main);
+    as3(&mut l1.keyframes[1], "function bump(n:int):int { score += n; return score % 3 + 1; }\nlabel = label + \"!\";\ntrace(\"frame 2: \" + bump(1) + \" \" + label);\ntrace(ghost.x);\ntrace(\"never\");");
+    as3(&mut l1.keyframes[2], "var spin:int = 0; while (true) { spin++; }");
+    let l2 = Arc::make_mut(&mut tl.layers[1]);
+    if let ElementKind::Symbol { events, .. } = &mut Arc::make_mut(&mut Arc::make_mut(&mut l2.keyframes[0]).elements[0]).kind {
+        events.clear();
+    }
+    // The door clip keeps its own count across its loops.
+    let door = Arc::make_mut(&mut d.library[0]);
+    let dl = Arc::make_mut(&mut door.timeline.layers[0]);
+    as3(&mut dl.keyframes[0], "var laps:int; laps++; if (laps > 1) trace(\"door lap \" + laps);");
+    d
+}
+
+#[test]
+fn the_js_player_runs_small_logic_like_the_rust_player() {
+    let doc = logic();
+    let m = movie(&doc, &HtmlOptions::default());
+    assert_eq!(m.report.get(KEPT_SCRIPTS), None, "every script links: {:?}", m.report);
+    assert!(m.json["timelines"][0]["fn"]["bump"].is_object() && m.json["timelines"][0]["vt"]["score"] == "int", "{}", m.json["timelines"][0]["vt"]);
+    let none = || (vec![], vec![]);
+    let mut script: Vec<(Vec<Event>, Vec<Event>)> = vec![none()];
+    script.push((vec![Event::Move(at(100.0, 100.0))], vec![]));
+    script.push((vec![Event::Down(at(101.0, 99.0))], vec![Event::Up(at(101.0, 99.0))]));
+    script.push((vec![Event::KeyDown(39), Event::KeyUp(39)], vec![Event::KeyDown(65)]));
+    script.push((vec![Event::KeyDown(32)], vec![]));
+    script.extend((0..14).map(|_| none()));
+    script.push((vec![Event::Move(at(10.0, 10.0)), Event::Leave], vec![Event::KeyDown(39)]));
+    script.extend((0..20).map(|_| none()));
+    let lines = compare(&doc, &script);
+    for want in ["start 0 go 0 1/33 null", "6 6 7 Infinity -2 0.25 4294967337 3.5 true true true", "10 true 100 100 1 true knob 1 4", "frame 2: 2 go!", "Script on frame 4 of the main timeline stopped: line 4: no instance named “ghost” here", "stopped ticking", "up 39 true", "key 65"] {
+        assert!(lines.iter().any(|l| l == want), "the logic fixture never wrote {want:?}: {lines:?}");
+    }
+    assert!(lines.iter().any(|l| l == "click knob true 11"), "{lines:?}");
+    assert!(lines.iter().any(|l| l.ends_with("ran more than 100000 steps (an endless loop?)")), "{lines:?}");
+    assert!(!lines.iter().any(|l| l == "never"));
+}
+
+#[test]
+fn the_js_player_draws_random_numbers_like_the_rust_player() {
+    // The seeded generator, number for number, at several seeds.
+    for seed in [0u64, 1, 7, 0xdead_beef, u64::from(u32::MAX) + 5] {
+        let mut d = Document::default();
+        let k = Arc::make_mut(&mut Arc::make_mut(&mut d.timeline_mut(0).layers[0]).keyframes[0]);
+        k.script = Some(FrameScript::Source(Arc::new(anicraft_doc::actions::SourceScript::new(anicraft_doc::actions::Language::ActionScript3, "for (var i:int = 0; i < 20; i++) trace(Math.random());"))));
+        let m = movie(&d, &HtmlOptions::default());
+        let rust = anicraft_doc::player::start_seeded(&d, seed, &mut NoScripts).output;
+        let mut js = Js::new(&m);
+        js.eval(&format!("(P = new AniCraft.Player({}, host, {seed}), 0)", m.json));
+        assert_eq!(js.eval("P.start().output"), json!(rust), "seed {seed}");
+    }
 }

@@ -1,3 +1,4 @@
+# Publishes the web editor (ADR 0036, docs/web.md) to GitHub Pages on every push to main.
 name: Deploy to GitHub Pages
 
 on:
@@ -17,34 +18,24 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-      - name: Install Trunk
-        uses: jetli/trunk-action@v0.5.0
-        with:
-          version: latest
-      - name: Build (release, WebAssembly)
-        shell: bash
+      - name: Rust with the wasm32 target
         run: |
-          set +e
-          trunk build --release --no-default-features --public-url "/${{ github.event.repository.name }}/" 2>&1 | tee build.log
-          code=${PIPESTATUS[0]}
-          if [ "$code" != "0" ]; then
-            # Surface the compiler errors as annotations (readable without the raw log).
-            sed 's/\x1b\[[0-9;]*m//g' build.log > clean.log
-            grep -nE "error(\[|:)|panicked|could not compile|failed to" -B1 -A9 clean.log | grep -v "build pipeline" | head -70 | sed ':a;N;$!ba;s/\n/%0A/g' | sed 's/^/::error title=build errors::/'
-          fi
-          exit $code
-        env:
-          RUSTFLAGS: --cfg=web_sys_unstable_apis --cfg getrandom_backend="wasm_js"
-      - run: touch dist/.nojekyll && cp dist/index.html dist/404.html
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: wasm-bindgen CLI at the version Cargo.lock pins
+        run: |
+          version="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"
+          cargo install wasm-bindgen-cli --version "$version" --locked
+      - name: Build the web editor
+        run: scripts/build-web.sh
+      - run: touch web/.nojekyll
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: web
 
   deploy:
     needs: build

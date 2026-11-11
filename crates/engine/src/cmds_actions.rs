@@ -17,7 +17,7 @@ use std::sync::Arc;
 pub fn specs() -> Vec<CommandSpec> {
     let c = |id, label, menu, shortcut, params, mutates, run| CommandSpec { id, label, menu, shortcut, params, mutates, run };
     vec![
-        c("control.test_movie", "Test Movie", "Control", Some("Ctrl+Enter"), "{frames?: steps to play (default 10 s of frames, at most 10,000), events?: [{tick, type: move|down|up|click|leave, x, y}]} plays the movie with its actions and frame scripts from the first frame; returns the output and where it ended (the app opens the Test Movie window)", false, test_movie as crate::RunFn),
+        c("control.test_movie", "Test Movie", "Control", Some("Ctrl+Enter"), "{frames?: steps to play (default 10 s of frames, at most 10,000), events?: [{tick, type: move|down|up|click|leave, x, y} or {tick, type: key_down|key_up|key, key: code|letter|LEFT…}], seed?: Math.random()'s seed (default 0)} plays the movie with its actions and frame scripts from the first frame; returns the output and where it ended (the app opens the Test Movie window)", false, test_movie as crate::RunFn),
         c("actions.set", "Set Actions", "", None, "{actions: [{op: stop|play|goto_and_play|goto_and_stop|next_frame|prev_frame|next_scene|prev_scene|trace|set_property, target?, frame?, scene?, message?, property?, value?}] | plugin: id, entry?, symbol?: id (a movie clip's timeline), layer?, frame?} sets what the keyframe at the frame runs; or {element, event: click|press|release|over|out, actions} sets an instance's event handler. An empty list clears it", true, set),
         c("actions.clear", "Clear Actions", "", None, "{symbol?, layer?, frame?} clears the keyframe's actions; {element, event?} clears an instance's handlers (one event, or all)", true, clear),
         c("actions.list", "List Actions", "", None, "{} every keyframe with actions or a frame script and every instance with event handlers, in every scene and symbol", false, list),
@@ -25,13 +25,22 @@ pub fn specs() -> Vec<CommandSpec> {
     ]
 }
 
+/// What a keyframe command may address: frames that run (actions and plug-in frame scripts:
+/// the main timeline and movie clips, not guides), or frames that keep a script (any symbol
+/// and guide layers too: kept scripts are content, ADR 0013 tier 1).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope {
+    Runs,
+    Keeps,
+}
+
 /// A timeline commands address: a scene's (the one being edited) or a library symbol's.
-fn timeline_mut(s: &mut Session, symbol: Option<SymbolId>) -> Result<&mut Timeline> {
+fn timeline_mut(s: &mut Session, symbol: Option<SymbolId>, scope: Scope) -> Result<&mut Timeline> {
     match symbol {
-        None => Ok(s.doc.timeline_mut(s.scene)),
+        None => Ok(crate::editing::edited_mut(&mut s.doc, s.scene, &s.editing)),
         Some(id) => {
             let sym = s.doc.library.iter_mut().find(|x| x.id == id).ok_or_else(|| EngineError::State(format!("no symbol with id {}", id.0)))?;
-            if sym.kind != SymbolKind::MovieClip {
+            if scope == Scope::Runs && sym.kind != SymbolKind::MovieClip {
                 return Err(EngineError::State(format!("“{}” is not a movie clip: only the main timeline and movie clips run frame actions", sym.name)));
             }
             Ok(&mut Arc::make_mut(sym).timeline)
@@ -41,6 +50,12 @@ fn timeline_mut(s: &mut Session, symbol: Option<SymbolId>) -> Result<&mut Timeli
 
 /// The keyframe covering `frame` on `layer` of the addressed timeline.
 fn keyframe_at<'a>(s: &'a mut Session, p: &Value) -> Result<(LayerId, &'a mut Keyframe)> {
+    keyframe_in(s, p, Scope::Runs)
+}
+
+/// The keyframe covering `{symbol?, layer?, frame?}`: on the active layer at the playhead by
+/// default, or a symbol's first layer at its first frame.
+pub(crate) fn keyframe_in<'a>(s: &'a mut Session, p: &Value, scope: Scope) -> Result<(LayerId, &'a mut Keyframe)> {
     let symbol = opt_u64(p, "symbol")?.map(SymbolId);
     let frame = opt_u32(p, "frame")?.unwrap_or(if symbol.is_some() { 0 } else { s.frame });
     if frame > crate::MAX_FRAME {
@@ -48,14 +63,14 @@ fn keyframe_at<'a>(s: &'a mut Session, p: &Value) -> Result<(LayerId, &'a mut Ke
     }
     let active = s.layer;
     let layer_param = opt_u64(p, "layer")?.map(LayerId);
-    let tl = timeline_mut(s, symbol)?;
+    let tl = timeline_mut(s, symbol, scope)?;
     let lid = match (layer_param, symbol) {
         (Some(l), _) => l,
         (None, None) => active,
         (None, Some(_)) => tl.layers.iter().find(|l| l.kind != LayerKind::Folder).map(|l| l.id).ok_or_else(|| EngineError::State("the symbol has no layers".into()))?,
     };
     let layer = tl.layer_mut(lid).ok_or_else(|| EngineError::State(format!("no layer with id {}", lid.0)))?;
-    if matches!(layer.kind, LayerKind::Folder | LayerKind::Guide) {
+    if layer.kind == LayerKind::Folder || (scope == Scope::Runs && layer.kind == LayerKind::Guide) {
         return Err(EngineError::State(format!("'{}' is a {} layer: its frames don't run actions", layer.name, if layer.kind == LayerKind::Folder { "folder" } else { "guide" })));
     }
     let i = layer.keyframe_index_at(frame).ok_or_else(|| EngineError::State(format!("frame {} is empty on '{}': add a keyframe first (F6 or F7)", frame + 1, layer.name)))?;
@@ -70,19 +85,20 @@ fn parse_actions(p: &Value) -> Result<Vec<Action>> {
     Ok(list)
 }
 
-/// The symbol instance `element` (or the selected one) on the active layer's keyframe at the
-/// playhead, for editing.
+/// The symbol instance `element` on the active layer's keyframe at the playhead (or the selected
+/// one, on its layer), for editing.
 fn instance_mut<'a>(s: &'a mut Session, p: &Value) -> Result<&'a mut Element> {
-    let id = match opt_u64(p, "element")? {
-        Some(id) => ElementId(id),
-        None => match s.selection.as_slice() {
-            [one] => *one,
-            [] => return Err(EngineError::State("select a movie clip or button instance, or pass 'element'".into())),
+    let (layer, id) = match opt_u64(p, "element")? {
+        // A selected element is looked for on its own layer.
+        Some(id) => (s.selection.iter().find(|(_, e)| e.0 == id).map_or(s.layer, |(l, _)| l), ElementId(id)),
+        None => match (s.selection.first(), s.selection.len()) {
+            (Some(one), 1) => one,
+            (None, _) => return Err(EngineError::State("select a movie clip or button instance, or pass 'element'".into())),
             _ => return Err(EngineError::State("select one instance".into())),
         },
     };
     let frame = s.frame;
-    let layer = s.layer_mut(None)?;
+    let layer = s.layer_mut(Some(layer))?;
     let i = layer.keyframe_index_at(frame).ok_or_else(|| EngineError::State(format!("frame {} is empty on this layer", frame + 1)))?;
     let k = layer.keyframe_mut(i).ok_or_else(|| EngineError::State("keyframe vanished".into()))?;
     let e = k.elements.iter_mut().find(|e| e.id == id).ok_or_else(|| EngineError::State(format!("no element {} on the active layer at frame {}", id.0, frame + 1)))?;
@@ -181,6 +197,8 @@ fn list(s: &mut Session, _: &Value) -> Result<Value> {
                     match script {
                         FrameScript::Actions(a) => v["actions"] = serde_json::to_value(a).unwrap_or(Value::Null),
                         FrameScript::Plugin(ps) => v["plugin"] = json!({"id": ps.id, "entry": ps.entry}),
+                        // The text is in `script.list`.
+                        FrameScript::Source(src) => v["script"] = json!({"language": src.language.key(), "lines": src.lines()}),
                     }
                     frames.push(v);
                 }
@@ -241,8 +259,9 @@ fn test_movie(s: &mut Session, p: &Value) -> Result<Value> {
         }
         Some(_) => return Err(EngineError::Param("param 'events' must be a list".into())),
     }
+    let seed = opt_u64(p, "seed")?.unwrap_or(anicraft_doc::player::DEFAULT_SEED);
     let mut runner = ScriptRunner::new(&s.plugins);
-    let mut movie = Movie::start(&s.doc, &mut runner);
+    let mut movie = Movie::start_seeded(&s.doc, seed, &mut runner);
     for tick in 1..=u64::from(frames) {
         let events: Vec<_> = timed.iter().filter(|(t, _)| *t == tick).flat_map(|(_, e)| e.iter().copied()).collect();
         movie.step(&s.doc, &events, &mut runner);

@@ -1,8 +1,9 @@
 //! Timeline evaluation: `(document, frame) -> DisplayList`. Pure, deterministic, no caching.
 
 use crate::camera::Camera;
+use crate::nine_slice::Slicing;
 use crate::player::PlayerState;
-use crate::{ColorEffect, Document, Element, ElementId, ElementKind, Layer, LayerId, LayerKind, Paint, Rgba, Shape, Stroke, SymbolId, SymbolKind, Timeline, TweenKind};
+use crate::{ColorTransform, Document, Element, ElementId, ElementKind, Layer, LayerId, LayerKind, Paint, Rgba, Shape, Stroke, SymbolId, SymbolKind, Timeline, TweenKind};
 use anicraft_geom::walk::PathWalk;
 use anicraft_geom::{Affine, FillRule, Path};
 use std::borrow::Cow;
@@ -20,7 +21,8 @@ pub struct DisplayItem {
     pub fill: Option<Paint>,
     pub stroke: Option<Stroke>,
     pub fill_rule: FillRule,
-    pub color: ColorEffect,
+    /// The colour transform of every instance around it, composed (ADR 0056).
+    pub color: ColorTransform,
     /// The top-level layer and element this item came from (for picking).
     pub layer: LayerId,
     pub element: ElementId,
@@ -32,11 +34,14 @@ pub struct DisplayItem {
     pub masks: Option<u32>,
     /// Guide artwork: shown while editing, never in output.
     pub guide: bool,
-    /// The innermost group this item fades with (see [`DisplayList::groups`]); `color.alpha`
+    /// The innermost group this item fades with (see [`DisplayList::groups`]); `color`
     /// leaves out the groups' opacity.
     pub group: Option<u32>,
     /// The decoded pixels a [`Paint::Bitmap`] fill shows (shared, never copied).
     pub image: Option<Arc<crate::Pixels>>,
+    /// Whether `image` is filtered between its pixels (the bitmap's Allow Smoothing, ADR 0050);
+    /// off, each pixel is a hard-edged square.
+    pub smooth: bool,
 }
 
 /// Back-to-front list of shapes.
@@ -70,7 +75,7 @@ impl DisplayList {
     /// The opacity an item ends up with: its own times every group's it is in (what an item
     /// looks like when nothing overlaps it; also what picking and outlines use).
     pub fn effective_alpha(&self, item: &DisplayItem) -> f32 {
-        let mut a = item.color.alpha;
+        let mut a = item.color.opacity();
         let mut g = item.group;
         for _ in 0..self.groups.len() {
             let Some(id) = g else { break };
@@ -124,6 +129,25 @@ pub fn evaluate(doc: &Document, frame: u32) -> DisplayList {
 pub fn evaluate_scene(doc: &Document, scene: usize, frame: u32) -> DisplayList {
     let mut out = DisplayList::default();
     eval_timeline(doc, doc.timeline(scene), frame, &Ctx::top(Affine::IDENTITY), &mut out, None);
+    out
+}
+
+/// A symbol's timeline at its own `frame`, in the symbol's space, as the stage edits it while the
+/// symbol is open for editing (ADR 0045): what picking and bounds use then. Its layers are the
+/// top-level ones, as a scene's are in [`evaluate_scene`].
+pub fn evaluate_timeline(doc: &Document, tl: &Timeline, frame: u32) -> DisplayList {
+    let mut out = DisplayList::default();
+    eval_timeline(doc, tl, frame, &Ctx::top(Affine::IDENTITY), &mut out, None);
+    out
+}
+
+/// [`evaluate_timeline`] placed by `xf` (symbol space to stage space): what an instance of the
+/// timeline at `xf` shows, but with the timeline's own layers as the top-level ones, so each item
+/// still says which of them it is on. The stage draws a symbol open in place this way when onion
+/// skin or Edit Multiple Frames composes its frames (ADR 0051).
+pub fn evaluate_timeline_at(doc: &Document, tl: &Timeline, frame: u32, xf: Affine) -> DisplayList {
+    let mut out = DisplayList::default();
+    eval_timeline(doc, tl, frame, &Ctx::top(xf), &mut out, None);
     out
 }
 
@@ -183,12 +207,25 @@ pub fn evaluate_layer_elements(layer: &Layer, frame: u32) -> Option<(u32, Cow<'_
 /// [`evaluate_layer_elements`] with a motion guide: tweened elements travel along `guide` (in
 /// the layer's own space) from the point nearest their start to the point nearest their end,
 /// turning with it when the tween orients to the path.
+///
+/// On an armature layer (ADR 0043) the instances are then placed by the pose at the frame
+/// (tweened between pose keyframes): forward kinematics from the root's own transform.
 pub fn evaluate_guided<'a>(layer: &'a Layer, frame: u32, guide: Option<&PathWalk>) -> Option<(u32, Cow<'a, [Arc<Element>]>)> {
+    let (start, els) = evaluate_tweened(layer, frame, guide)?;
+    let Some(arm) = layer.armature.as_deref().filter(|a| layer.kind == crate::LayerKind::Armature && !a.is_empty()) else { return Some((start, els)) };
+    let pose = crate::armature::pose_at(layer, frame).unwrap_or_default();
+    let mut els = els.into_owned();
+    crate::armature::apply(arm, &mut els, &pose);
+    Some((start, Cow::Owned(els)))
+}
+
+fn evaluate_tweened<'a>(layer: &'a Layer, frame: u32, guide: Option<&PathWalk>) -> Option<(u32, Cow<'a, [Arc<Element>]>)> {
     let idx = layer.keyframe_index_at(frame)?;
     let kf = layer.keyframes.get(idx)?;
-    // A motion tween: its target follows the property curves; anything else on the key holds.
+    // A motion tween: its target follows the property curves (and its motion path, ADR 0030);
+    // anything else on the key holds.
     if let Some(m) = &kf.motion {
-        let Some(i) = m.target_index(&kf.elements).filter(|_| !m.tracks.is_empty()) else { return Some((kf.start, Cow::Borrowed(&kf.elements))) };
+        let Some(i) = m.target_index(&kf.elements).filter(|_| !m.tracks.is_empty() || m.path.is_some()) else { return Some((kf.start, Cow::Borrowed(&kf.elements))) };
         let mut els = kf.elements.clone();
         if let Some(slot) = els.get_mut(i) {
             *slot = Arc::new(m.apply(slot, (frame - kf.start) as f32));
@@ -238,7 +275,7 @@ fn interpolate(a: &Element, b: &Element, t: f32, morph: bool, hints: &[(anicraft
                 (Some(x), Some(y)) => Some(x.lerp(y, t)),
                 (x, _) => x.clone(),
             };
-            ElementKind::Shape(Shape { path, fill, stroke, fill_rule: sa.fill_rule })
+            ElementKind::Shape(Shape { path, fill, stroke, fill_rule: sa.fill_rule, merge: sa.merge })
         }
         (ElementKind::Symbol { symbol: s1, .. }, ElementKind::Symbol { symbol: s2, .. }) if s1 == s2 => a.kind.clone(),
         // Text tweens its placement and colour effect; the words stay the first keyframe's.
@@ -258,7 +295,7 @@ fn interpolate(a: &Element, b: &Element, t: f32, morph: bool, hints: &[(anicraft
 struct Ctx {
     /// Local → stage transform and colour effect of the enclosing instance.
     xf: Affine,
-    color: ColorEffect,
+    color: ColorTransform,
     depth: usize,
     /// The top-level layer and element everything inside belongs to (for picking).
     root: Option<(LayerId, ElementId)>,
@@ -274,11 +311,14 @@ struct Ctx {
     /// The camera the scene's layers are seen through (main timeline only; each layer's
     /// transform comes from it and the layer's depth, and `xf` is ignored).
     camera: Option<Camera>,
+    /// The 9-slice scaling of the instance whose timeline this is (ADR 0055): its own shapes go
+    /// through it, in place of the scale in `xf`. Not passed on to nested symbols.
+    slice: Option<Slicing>,
 }
 
 impl Ctx {
     fn top(xf: Affine) -> Ctx {
-        Ctx { xf, color: ColorEffect::default(), depth: 0, root: None, outline: None, clip: None, masks: None, guide: false, group: None, camera: None }
+        Ctx { xf, color: ColorTransform::IDENTITY, depth: 0, root: None, outline: None, clip: None, masks: None, guide: false, group: None, camera: None, slice: None }
     }
 
     /// A main timeline seen through `camera`: its tint colours everything.
@@ -398,27 +438,41 @@ fn eval_timeline(doc: &Document, tl: &Timeline, frame: u32, cx: &Ctx, out: &mut 
             };
             let (root_layer, root_el) = cx.root.unwrap_or((layer.id, el.id));
             let xf = layer_xf.mul(&el.transform);
-            let color = cx.color.concat(&el.color);
+            let fx = el.color.transform();
+            let color = cx.color.concat(&fx);
             match &el.kind {
-                ElementKind::Shape(s) => out.items.push(DisplayItem {
-                    path: s.path.clone(),
-                    transform: xf,
-                    fill: s.fill.clone(),
-                    stroke: s.stroke.clone(),
-                    fill_rule: s.fill_rule,
-                    color,
-                    layer: root_layer,
-                    element: root_el,
-                    outline: layer_outline,
-                    clip,
-                    masks,
-                    guide,
-                    group: cx.group,
-                    image: match &s.fill {
-                        Some(Paint::Bitmap { bitmap, .. }) => doc.bitmap(*bitmap).and_then(crate::Bitmap::pixels),
-                        _ => None,
-                    },
-                }),
+                ElementKind::Shape(s) => {
+                    // Inside a 9-slice instance, the shape's outline is cut and mapped (bitmap
+                    // fills scale normally, as in Animate).
+                    let sliced = cx.slice.filter(|_| !matches!(s.fill, Some(Paint::Bitmap { .. }))).map(|sl| sliced_shape(s, &el.transform, &sl));
+                    let (path, transform, fill, stroke) = match sliced {
+                        Some(x) => x,
+                        None => (s.path.clone(), xf, s.fill.clone(), s.stroke.clone()),
+                    };
+                    out.items.push(DisplayItem {
+                        path,
+                        transform,
+                        fill,
+                        stroke,
+                        fill_rule: s.fill_rule,
+                        color,
+                        layer: root_layer,
+                        element: root_el,
+                        outline: layer_outline,
+                        clip,
+                        masks,
+                        guide,
+                        group: cx.group,
+                        image: match &s.fill {
+                            Some(Paint::Bitmap { bitmap, .. }) => doc.bitmap(*bitmap).and_then(crate::Bitmap::pixels),
+                            _ => None,
+                        },
+                        smooth: match &s.fill {
+                            Some(Paint::Bitmap { bitmap, .. }) => doc.bitmap(*bitmap).is_none_or(|b| b.smoothing),
+                            _ => true,
+                        },
+                    });
+                }
                 ElementKind::Text(t) => out.items.push(DisplayItem {
                     path: t.outline.clone(),
                     transform: xf,
@@ -434,6 +488,7 @@ fn eval_timeline(doc: &Document, tl: &Timeline, frame: u32, cx: &Ctx, out: &mut 
                     guide,
                     group: cx.group,
                     image: None,
+                    smooth: true,
                 }),
                 ElementKind::Camera => {}
                 ElementKind::Symbol { symbol, loop_mode, first_frame, blend, filters, .. } => {
@@ -455,20 +510,43 @@ fn eval_timeline(doc: &Document, tl: &Timeline, frame: u32, cx: &Ctx, out: &mut 
                     // group at full opacity, and the group blends at the instance's alpha. (Mask
                     // artwork ignores opacity, so it never needs one.)
                     // A blend mode composites the instance on its own too, then blends it.
-                    let fade = el.color.alpha.clamp(0.0, 1.0);
+                    // An alpha offset (Advanced) changes each item's alpha on its own: it stays
+                    // in the items' transform, and the group (for a blend or filters) is opaque.
+                    let fade = fx.alpha_factor().unwrap_or(1.0);
                     let (color, group) = if masks.is_none() && (fade < 1.0 - 1e-4 || !blend.is_normal() || !filters.is_empty()) {
                         let gid = out.groups.len() as u32;
                         out.groups.push(Group { parent: cx.group, alpha: fade, blend: *blend, filters: filters.iter().map(crate::Filter::sanitized).collect(), clip });
-                        (cx.color.concat(&ColorEffect { alpha: 1.0, ..el.color }), Some(gid))
+                        let inner = if fx.alpha_factor().is_some() { fx.without_alpha() } else { fx };
+                        (cx.color.concat(&inner), Some(gid))
                     } else {
                         (color, cx.group)
                     };
-                    let inner = Ctx { xf, color, depth: cx.depth + 1, root: Some((root_layer, root_el)), outline: layer_outline, clip, masks, guide, group, camera: None };
+                    // A symbol with 9-slice guides, scaled: its shapes are sliced (ADR 0055).
+                    let slice = crate::nine_slice::slicing(doc, sym, &el.transform).map(|s| Slicing { post: layer_xf.mul(&s.post), ..s });
+                    let inner = Ctx { xf, color, depth: cx.depth + 1, root: Some((root_layer, root_el)), outline: layer_outline, clip, masks, guide, group, camera: None, slice };
                     eval_timeline(doc, &sym.timeline, local, &inner, out, child.as_ref());
                 }
             }
         }
     }
+}
+
+/// A shape inside a 9-slice instance (ADR 0055): its outline placed by its own transform, then
+/// cut at the guides and mapped piecewise; drawn by the instance's transform without its scale.
+/// The stroke keeps its width (times the shape's own scale inside the symbol); gradients follow
+/// the map, their size the shape's own scale times the instance's.
+fn sliced_shape(s: &Shape, own: &Affine, sl: &Slicing) -> (Arc<Path>, Affine, Option<Paint>, Option<Stroke>) {
+    let path = Arc::new(anicraft_geom::slice::slice_path(&s.path, own, &sl.map));
+    let k = own.mean_scale();
+    let stroke = s.stroke.as_ref().map(|st| if (k - 1.0).abs() > 1e-6 { st.scaled(k) } else { st.clone() });
+    let at = |p: anicraft_geom::Vec2| sl.map.map(own.apply(p));
+    let size = k * sl.scale.mean_scale();
+    let fill = s.fill.as_ref().map(|f| match f {
+        Paint::Linear { start, end, stops } => Paint::Linear { start: at(*start), end: at(*end), stops: stops.clone() },
+        Paint::Radial { center, radius, stops } => Paint::Radial { center: at(*center), radius: radius * size, stops: stops.clone() },
+        Paint::Solid(_) | Paint::Bitmap { .. } => f.clone(),
+    });
+    (path, sl.post, fill, stroke)
 }
 
 #[cfg(test)]

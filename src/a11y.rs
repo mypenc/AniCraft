@@ -148,13 +148,14 @@ pub enum Region {
 impl Region {
     pub const CYCLE: [Region; 5] = [Region::Stage, Region::Timeline, Region::Properties, Region::Library, Region::Tools];
 
+    /// English (a key): translate where it is shown with `crate::i18n::t`.
     pub fn label(self) -> &'static str {
         match self {
-            Region::Stage => "Stage",
-            Region::Timeline => "Timeline",
-            Region::Properties => "Properties",
-            Region::Library => "Library",
-            Region::Tools => "Tools",
+            Region::Stage => tr_noop!("Stage"),
+            Region::Timeline => tr_noop!("Timeline"),
+            Region::Properties => tr_noop!("Properties"),
+            Region::Library => tr_noop!("Library"),
+            Region::Tools => tr_noop!("Tools"),
         }
     }
 
@@ -348,10 +349,10 @@ mod tests {
     fn every_interactive_node_has_a_name_and_a_role() {
         let mut found = Vec::new();
         found.extend(check("default", |_, _| {}));
-        for tool in [Tool::Rect, Tool::Star, Tool::Text, Tool::Pencil, Tool::PaintBucket, Tool::InkBottle, Tool::Pen] {
+        for tool in [Tool::Bone, Tool::Rect, Tool::Star, Tool::Text, Tool::Pencil, Tool::Brush, Tool::Eraser, Tool::PaintBucket, Tool::InkBottle, Tool::Eyedropper, Tool::Pen] {
             found.extend(check(&format!("{tool:?} tool"), |a, _| a.tool = tool));
         }
-        for panel in ["select", "motion", "motionspan", "camera", "cameraview", "sound", "prefs", "shortcuts", "palette", "about", "files", "licenses", "confirm", "recovery", "frames"] {
+        for panel in ["select", "motion", "motionspan", "motionpath", "motionpoints", "motionedit", "motionpins", "motionpinsspan", "rawsub", "camera", "cameraview", "bones", "sound", "envelope", "prefs", "shortcuts", "palette", "about", "files", "licenses", "confirm", "recovery", "frames", "actions", "script", "scriptproblems", "testscript", "onion", "onionmenu", "editmultiple", "library", "librarymenu", "edittransform", "onionsymbol", "convert", "mixed", "bitmap", "nineslice", "nineslicedit", "find", "explorer"] {
             found.extend(check(panel, |a, _| a.open_panel(Some(panel))));
         }
         // The layer depth row shows on artwork layers once the scene has a camera.
@@ -367,6 +368,18 @@ mod tests {
             a.run("symbol.set_kind", serde_json::json!({"symbol": symbol, "kind": "movie_clip"}));
             let filters: Vec<_> = anicraft_engine::doc::Filter::KINDS.iter().map(|(k, _)| serde_json::json!({"type": k})).collect();
             assert!(a.run("element.set_filters", serde_json::json!({"filters": filters})).is_some());
+        }));
+        // Each colour effect style's controls (ADR 0056), and the Motion Editor's colour rows.
+        for style in ["brightness", "tint", "advanced", "alpha"] {
+            found.extend(check(&format!("colour effect {style}"), |a, _| {
+                a.run("layer.select", serde_json::json!({"index": 0}));
+                a.run("edit.select_all", serde_json::json!({}));
+                assert!(a.run("element.set_color_effect", serde_json::json!({"style": style})).is_some());
+            }));
+        }
+        found.extend(check("motion editor colour rows", |a, _| {
+            a.open_panel(Some("motionedit"));
+            a.me_styles = vec![anicraft_engine::doc::ColorStyle::Tint, anicraft_engine::doc::ColorStyle::Advanced, anicraft_engine::doc::ColorStyle::Brightness];
         }));
         found.extend(check("high contrast at 200%", |a, ctx| {
             let mut p = a.prefs.clone();

@@ -135,6 +135,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aho-corasick"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "aligned-vec"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -207,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "anicraft"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anicraft-audio",
  "anicraft-doc",
@@ -219,15 +228,21 @@ dependencies = [
  "eframe",
  "egui",
  "fontdb",
+ "js-sys",
  "rfd",
  "serde",
  "serde_json",
+ "sys-locale",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
  "winresource",
 ]
 
 [[package]]
 name = "anicraft-actions"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -235,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "anicraft-audio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "lewton",
  "nanomp3",
@@ -243,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "anicraft-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anicraft-doc",
  "anicraft-engine",
@@ -254,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "anicraft-doc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anicraft-actions",
  "anicraft-audio",
@@ -267,7 +282,7 @@ dependencies = [
 
 [[package]]
 name = "anicraft-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anicraft-doc",
  "anicraft-geom",
@@ -277,17 +292,21 @@ dependencies = [
  "anicraft-text",
  "anicraft-xfl",
  "gif",
+ "miniz_oxide 0.8.9",
  "png 0.17.16",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "wasm-bindgen-test",
  "wat",
+ "web-time",
 ]
 
 [[package]]
 name = "anicraft-geom"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -295,21 +314,23 @@ dependencies = [
 
 [[package]]
 name = "anicraft-gpu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anicraft-doc",
  "anicraft-geom",
  "anicraft-render",
  "bytemuck",
+ "naga",
  "pollster 1.0.1",
  "rayon",
  "thiserror 2.0.21",
+ "web-time",
  "wgpu",
 ]
 
 [[package]]
 name = "anicraft-plugins"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -320,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "anicraft-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anicraft-doc",
  "anicraft-geom",
@@ -333,7 +354,7 @@ dependencies = [
 
 [[package]]
 name = "anicraft-svg"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anicraft-doc",
  "anicraft-geom",
@@ -344,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "anicraft-text"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anicraft-geom",
  "fontdb",
@@ -354,7 +375,7 @@ dependencies = [
 
 [[package]]
 name = "anicraft-xfl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anicraft-doc",
  "anicraft-geom",
@@ -367,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "anicraft-xml"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -883,6 +904,12 @@ dependencies = [
  "wayland-backend",
  "wayland-client",
 ]
+
+[[package]]
+name = "cast"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cc"
@@ -2303,6 +2330,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "minicov"
+version = "0.3.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4869b6a491569605d66d3952bcdf03df789e5b536e5f0cf7758a7f08a55ae24d"
+dependencies = [
+ "cc",
+ "walkdir",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2420,6 +2457,15 @@ name = "nohash-hasher"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
+
+[[package]]
+name = "nu-ansi-term"
+version = "0.50.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+dependencies = [
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "num-bigint"
@@ -2876,6 +2922,12 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "oorandom"
+version = "11.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "orbclient"
@@ -3336,6 +3388,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-automata"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-syntax"
+version = "0.8.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
 name = "regress"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3771,6 +3852,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sys-locale"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
+dependencies = [
+ "js-sys",
+ "libc",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "tag_ptr"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4191,6 +4284,45 @@ checksum = "23f0c9c52aa7cd7d77769a4cfe2a9adb1b331f489a41d912ce14513d5ab995c6"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "wasm-bindgen-test"
+version = "0.3.79"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae7499dfd45780a0a91d7ee6bb9ac51970a4479a41a89da443fdda5a39547d42"
+dependencies = [
+ "async-trait",
+ "cast",
+ "js-sys",
+ "libm",
+ "minicov",
+ "nu-ansi-term",
+ "num-traits",
+ "oorandom",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test-macro",
+ "wasm-bindgen-test-shared",
+]
+
+[[package]]
+name = "wasm-bindgen-test-macro"
+version = "0.3.79"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b84b5ac638bfb168196a1a461fcc8f46a294a18b1b6be52133b4e0db122cc9f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
+name = "wasm-bindgen-test-shared"
+version = "0.2.129"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f692aa943ccd88363733b77063f32cfed5bc6cbea8e6e8b251b302f881606fe"
 
 [[package]]
 name = "wasm-encoder"
