@@ -283,6 +283,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let multi = crate::onion::editing(app) && !preview;
     let sel_bounds = if multi { crate::onion::selection_bounds(app) } else { bounds_arr(app.s.selection_bounds()) };
     let sel_rect = sel_bounds.map(|b| Rect::from_min_max(to_screen(Vec2::new(b[0], b[1])), to_screen(Vec2::new(b[2], b[3]))));
+    // The transformation point on screen: the box centre unless it was moved (#178).
+    let sel_pivot = sel_bounds.map(|b| {
+        let pv = xf_pivot(app, b);
+        to_screen(Vec2::new(pv[0], pv[1]))
+    });
+    let xf_zone_at = |p: Pos2| sel_rect.zip(sel_pivot).and_then(|(r, pv)| xf_zone(r, pv, p));
     // Shape hint markers take the pointer first with the selection tools (ADR 0023).
     let hint_tools = matches!(app.tool, Tool::Select | Tool::Transform | Tool::Subselect) && !panning && !preview;
     let hint_marks = if hint_tools { crate::shape_hints::markers(app) } else { Vec::new() };
@@ -327,7 +333,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             Tool::Transform => {
                 let zone = match app.drag {
                     Drag::Transform { kind, .. } | Drag::MultiTransform { kind, .. } => Some(kind),
-                    _ => sel_rect.zip(pointer).and_then(|(r, p)| xf_zone(r, p)),
+                    Drag::Pivot => Some(XfKind::Pivot),
+                    _ => pointer.and_then(xf_zone_at),
                 };
                 match zone {
                     Some(XfKind::Scale { hx, hy }) if hx * hy > 0 => CursorIcon::ResizeNwSe,
@@ -337,6 +344,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     Some(XfKind::Skew { hy: 0, .. }) => CursorIcon::ResizeVertical,
                     Some(XfKind::Skew { .. }) => CursorIcon::ResizeHorizontal,
                     Some(XfKind::Rotate) => CursorIcon::Alias,
+                    Some(XfKind::Pivot) => CursorIcon::Grab,
                     Some(XfKind::Move) => CursorIcon::Move,
                     None => CursorIcon::Default,
                 }
@@ -385,7 +393,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             match tool {
                 // Edit Multiple Frames (ADR 0047): artwork on every keyframe between the markers;
                 // Free Transform's handles transform it all about one pivot (ADR 0051).
-                Tool::Transform if multi && let (Some(kind), Some(bounds)) = (sel_rect.and_then(|r| xf_zone(r, press)), sel_bounds) => {
+                Tool::Transform if sel_bounds.is_some() && xf_zone_at(press) == Some(XfKind::Pivot) => Drag::Pivot,
+                Tool::Transform if multi && let (Some(kind), Some(bounds)) = (xf_zone_at(press), sel_bounds) => {
                     app.s.begin_gesture(tr_noop!("Free Transform"));
                     Drag::MultiTransform { kind, start: sp, bounds, applied: Affine::IDENTITY }
                 }
@@ -421,7 +430,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     None => Drag::Marquee { start: sp, cur: sp },
                 },
                 Tool::Transform => {
-                    let zone = sel_rect.and_then(|r| xf_zone(r, press));
+                    let zone = xf_zone_at(press);
                     match (zone, sel_bounds) {
                         (Some(kind), Some(bounds)) => {
                             app.s.begin_gesture(tr_noop!("Free Transform"));
@@ -493,7 +502,18 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 snap_draw(app, c, zoom)
             });
         }
+        // A free-transform drag turns and scales about the point the box had when it began.
+        let drag_pivot = match app.drag {
+            Drag::Transform { bounds, .. } | Drag::MultiTransform { bounds, .. } => xf_pivot(app, bounds),
+            _ => [0.0, 0.0],
+        };
         match (&mut app.drag, cur) {
+            (Drag::Pivot, Some(c)) => {
+                if let Some(b) = sel_bounds {
+                    let at = if alt { [c.x, c.y] } else { snap_pivot(b, [c.x, c.y], PIVOT_SNAP / zoom.max(1e-3)) };
+                    set_xf_pivot(app, b, at);
+                }
+            }
             (Drag::Pan, _) => app.view.pan += resp.drag_delta(),
             (Drag::Move { last }, Some(c)) => {
                 let d = c - *last;
@@ -511,7 +531,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             (Drag::MultiMarquee { cur: m, .. }, Some(c)) => *m = c,
             (Drag::MultiTransform { kind, start, bounds, applied }, Some(c)) => {
                 let (kind, start, bounds, applied) = (*kind, *start, *bounds, *applied);
-                let total = xf_total(kind, bounds, start, c, shift, alt);
+                let total = xf_total(kind, bounds, start, c, shift, alt, drag_pivot);
                 // Only the change since the last frame; the gesture makes it one undo step.
                 if let Some(inv) = applied.inverse() {
                     let delta = total.mul(&inv);
@@ -544,7 +564,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
             }
             (Drag::Transform { kind, start, bounds, applied }, Some(c)) => {
-                let total = xf_total(*kind, *bounds, *start, c, shift, alt);
+                let total = xf_total(*kind, *bounds, *start, c, shift, alt, drag_pivot);
                 // Send only the change since the last frame; the gesture makes it one undo step.
                 if let Some(inv) = applied.inverse() {
                     let delta = total.mul(&inv);
@@ -597,6 +617,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 
     if resp.drag_stopped() {
+        let ended = app.drag;
         match app.drag {
             Drag::Move { .. } | Drag::SnapMove { .. } => {
                 app.drop_raw();
@@ -628,7 +649,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 app.run("raw.select_rect", json!({"x0": start.x, "y0": start.y, "x1": cur.x, "y1": cur.y, "add": shift}));
             }
             Drag::Shape { start, cur } => create_shape(app, start, cur),
-            Drag::Pan | Drag::None | Drag::CameraWheel { .. } => {}
+            Drag::Pan | Drag::Pivot | Drag::None | Drag::CameraWheel { .. } => {}
+        }
+        // The transformation point goes where the artwork took it (#178).
+        if let Drag::Transform { bounds, applied, .. } | Drag::MultiTransform { bounds, applied, .. } = ended {
+            let before = xf_pivot(app, bounds);
+            let after = applied.apply(Vec2::new(before[0], before[1]));
+            let now = if multi { crate::onion::selection_bounds(app) } else { bounds_arr(app.s.selection_bounds()) };
+            if let Some(now) = now {
+                set_xf_pivot(app, now, [after.x, after.y]);
+            }
         }
         app.drag = Drag::None;
         app.snap_ring = None;
@@ -677,6 +707,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     }
                 }
                 Tool::Bone if !panning => crate::bone_tool::click(app, xf, p),
+                // A click on the transformation point keeps the selection; a double-click centres it.
+                Tool::Transform if !panning && sel_pivot.is_some_and(|pv| pv.distance(p) <= PIVOT_HIT) => {
+                    if resp.double_clicked() {
+                        app.xf_pivot = None;
+                    }
+                }
                 Tool::Select | Tool::Transform if !panning && multi => crate::onion::click(app, sp, shift, zoom),
                 // A click on a bone picks it (ADR 0043).
                 Tool::Select if !panning && let Some((layer, bone, _)) = crate::bone_tool::hit(app, xf, p) => crate::bone_tool::select(app, layer, Some(bone)),
@@ -1037,8 +1073,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             painter.rect_filled(hr, 0.0, Color32::WHITE);
             painter.rect_stroke(hr, 0.0, Stroke::new(1.0, T.selection), StrokeKind::Middle);
         }
-        // transformation point (centre)
-        let c = r.center();
+        // transformation point (the centre until it is moved)
+        let c = sel_pivot.unwrap_or(r.center());
         painter.circle(c, 4.0, Color32::WHITE, Stroke::new(1.0, T.selection));
         painter.line_segment([c - vec2(6.0, 0.0), c + vec2(6.0, 0.0)], Stroke::new(1.0, T.selection));
         painter.line_segment([c - vec2(0.0, 6.0), c + vec2(0.0, 6.0)], Stroke::new(1.0, T.selection));
@@ -1402,6 +1438,9 @@ const HANDLE: f32 = 8.0;
 const ROTATE_ZONE: f32 = 22.0;
 /// How far from a box edge line (screen space) a press still grabs it to skew.
 const SKEW_ZONE: f32 = 5.0;
+/// The transformation point's grab radius and how near a handle it snaps (screen space, #178).
+const PIVOT_HIT: f32 = 7.0;
+const PIVOT_SNAP: f32 = 10.0;
 
 fn bounds_arr(b: anicraft_engine::geom::Rect) -> Option<[f32; 4]> {
     (!b.is_empty()).then_some([b.min.x, b.min.y, b.max.x, b.max.y])
@@ -1414,7 +1453,11 @@ fn handles(r: Rect) -> [(Pos2, i8, i8); 8] {
 }
 
 /// What dragging from screen point `p` would do to a selection drawn as `r`.
-fn xf_zone(r: Rect, p: Pos2) -> Option<XfKind> {
+fn xf_zone(r: Rect, pivot: Pos2, p: Pos2) -> Option<XfKind> {
+    // The transformation point first: it may sit on a handle, or out in the open.
+    if pivot.distance(p) <= PIVOT_HIT {
+        return Some(XfKind::Pivot);
+    }
     for (h, hx, hy) in handles(r) {
         if (p.x - h.x).abs() <= HANDLE && (p.y - h.y).abs() <= HANDLE {
             return Some(XfKind::Scale { hx, hy });
@@ -1439,12 +1482,47 @@ fn xf_zone(r: Rect, p: Pos2) -> Option<XfKind> {
     r.expand(2.0).contains(p).then_some(XfKind::Move)
 }
 
-/// The whole transform of a free-transform drag from `start` to `cur` (stage space).
-pub(crate) fn xf_total(kind: XfKind, b: [f32; 4], start: Pos2, cur: Pos2, shift: bool, alt: bool) -> Affine {
+/// Free Transform's transformation point (stage space) for the box `b`: the centre unless the
+/// artist moved it, and then where it sits relative to the box (#178).
+fn xf_pivot(app: &App, b: [f32; 4]) -> [f32; 2] {
+    let f = match &app.xf_pivot {
+        Some((sel, f)) if *sel == app.s.selection => *f,
+        _ => [0.5, 0.5],
+    };
+    [b[0] + (b[2] - b[0]) * f[0], b[1] + (b[3] - b[1]) * f[1]]
+}
+
+/// Puts the transformation point at stage position `p`, remembered against the box `b`.
+fn set_xf_pivot(app: &mut App, b: [f32; 4], p: [f32; 2]) {
+    let frac = |v: f32, lo: f32, hi: f32| if (hi - lo).abs() < 1e-3 || !v.is_finite() { 0.5 } else { (v - lo) / (hi - lo) };
+    let f = [frac(p[0], b[0], b[2]), frac(p[1], b[1], b[3])];
+    let centred = (f[0] - 0.5).abs() < 1e-4 && (f[1] - 0.5).abs() < 1e-4;
+    app.xf_pivot = (!centred).then(|| (app.s.selection.clone(), f));
+}
+
+/// `p`, or the nearest of the box's corners, edge middles and centre when one is within `tol`.
+fn snap_pivot(b: [f32; 4], p: [f32; 2], tol: f32) -> [f32; 2] {
     let [x0, y0, x1, y1] = b;
-    let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    let mut best = (tol, p);
+    for x in [x0, (x0 + x1) / 2.0, x1] {
+        for y in [y0, (y0 + y1) / 2.0, y1] {
+            let d = ((p[0] - x).powi(2) + (p[1] - y).powi(2)).sqrt();
+            if d <= best.0 {
+                best = (d, [x, y]);
+            }
+        }
+    }
+    best.1
+}
+
+/// The whole transform of a free-transform drag from `start` to `cur` (stage space).
+/// `pivot` is the transformation point: Alt-scaling and rotation are about it.
+pub(crate) fn xf_total(kind: XfKind, b: [f32; 4], start: Pos2, cur: Pos2, shift: bool, alt: bool, pivot: [f32; 2]) -> Affine {
+    let [x0, y0, x1, y1] = b;
+    let [cx, cy] = pivot;
     let about = |px: f32, py: f32, m: Affine| Affine::translate(px, py).mul(&m).mul(&Affine::translate(-px, -py));
     match kind {
+        XfKind::Pivot => Affine::IDENTITY,
         XfKind::Move => {
             let mut d = cur - start;
             if shift {
@@ -1594,6 +1672,8 @@ mod xf_tests {
     use super::*;
 
     const B: [f32; 4] = [0.0, 0.0, 100.0, 50.0];
+    /// B's centre, the transformation point unless it was moved.
+    const C: [f32; 2] = [50.0, 25.0];
 
     fn apply(m: &Affine, x: f32, y: f32) -> Vec2 {
         m.apply(Vec2::new(x, y))
@@ -1601,31 +1681,31 @@ mod xf_tests {
 
     #[test]
     fn corner_scale_keeps_the_opposite_corner_fixed() {
-        let m = xf_total(XfKind::Scale { hx: 1, hy: 1 }, B, pos2(100.0, 50.0), pos2(200.0, 100.0), false, false);
+        let m = xf_total(XfKind::Scale { hx: 1, hy: 1 }, B, pos2(100.0, 50.0), pos2(200.0, 100.0), false, false, C);
         assert_eq!(apply(&m, 0.0, 0.0), Vec2::new(0.0, 0.0));
         assert_eq!(apply(&m, 100.0, 50.0), Vec2::new(200.0, 100.0));
     }
 
     #[test]
     fn shift_keeps_proportions_and_alt_scales_from_centre() {
-        let m = xf_total(XfKind::Scale { hx: 1, hy: 1 }, B, pos2(100.0, 50.0), pos2(300.0, 60.0), true, false);
+        let m = xf_total(XfKind::Scale { hx: 1, hy: 1 }, B, pos2(100.0, 50.0), pos2(300.0, 60.0), true, false, C);
         let p = apply(&m, 100.0, 50.0);
         assert!((p.x / 100.0 - p.y / 50.0).abs() < 1e-4, "{p:?}");
-        let m = xf_total(XfKind::Scale { hx: 1, hy: 0 }, B, pos2(100.0, 25.0), pos2(150.0, 25.0), false, true);
+        let m = xf_total(XfKind::Scale { hx: 1, hy: 0 }, B, pos2(100.0, 25.0), pos2(150.0, 25.0), false, true, C);
         assert_eq!(apply(&m, 50.0, 25.0), Vec2::new(50.0, 25.0), "centre stays put");
         assert_eq!(apply(&m, 100.0, 0.0).x, 150.0);
     }
 
     #[test]
     fn edge_scale_only_changes_one_axis_and_never_collapses() {
-        let m = xf_total(XfKind::Scale { hx: 0, hy: 1 }, B, pos2(50.0, 50.0), pos2(50.0, 0.0), false, false);
+        let m = xf_total(XfKind::Scale { hx: 0, hy: 1 }, B, pos2(50.0, 50.0), pos2(50.0, 0.0), false, false, C);
         assert!(m.determinant().abs() > 0.0, "clamped above zero");
         assert_eq!(m.m[0], 1.0);
     }
 
     #[test]
     fn rotate_snaps_with_shift_and_keeps_centre() {
-        let m = xf_total(XfKind::Rotate, B, pos2(110.0, 25.0), pos2(50.0, 100.0), true, false);
+        let m = xf_total(XfKind::Rotate, B, pos2(110.0, 25.0), pos2(50.0, 100.0), true, false, C);
         let c = apply(&m, 50.0, 25.0);
         assert!(c.distance(Vec2::new(50.0, 25.0)) < 1e-3);
         let angle = m.decompose().rotation.to_degrees();
@@ -1635,7 +1715,7 @@ mod xf_tests {
     #[test]
     fn dragging_the_top_edge_shears_sideways_about_the_bottom_edge() {
         // B is 100 x 50: dragging the top edge 10 right moves the top edge 10 right.
-        let m = xf_total(XfKind::Skew { hx: 0, hy: -1 }, B, pos2(50.0, 0.0), pos2(60.0, 0.0), false, false);
+        let m = xf_total(XfKind::Skew { hx: 0, hy: -1 }, B, pos2(50.0, 0.0), pos2(60.0, 0.0), false, false, C);
         assert_eq!(apply(&m, 0.0, 0.0), Vec2::new(10.0, 0.0));
         assert_eq!(apply(&m, 0.0, 50.0), Vec2::new(0.0, 50.0), "the opposite edge stays put");
         assert!((m.determinant() - 1.0).abs() < 1e-5, "a shear keeps the area");
@@ -1643,25 +1723,47 @@ mod xf_tests {
 
     #[test]
     fn dragging_the_right_edge_shears_vertically_and_alt_pivots_on_the_centre() {
-        let m = xf_total(XfKind::Skew { hx: 1, hy: 0 }, B, pos2(100.0, 25.0), pos2(100.0, 35.0), false, false);
+        let m = xf_total(XfKind::Skew { hx: 1, hy: 0 }, B, pos2(100.0, 25.0), pos2(100.0, 35.0), false, false, C);
         assert_eq!(apply(&m, 100.0, 0.0), Vec2::new(100.0, 10.0));
         assert_eq!(apply(&m, 0.0, 0.0), Vec2::new(0.0, 0.0));
-        let m = xf_total(XfKind::Skew { hx: 1, hy: 0 }, B, pos2(100.0, 25.0), pos2(100.0, 35.0), false, true);
+        let m = xf_total(XfKind::Skew { hx: 1, hy: 0 }, B, pos2(100.0, 25.0), pos2(100.0, 35.0), false, true, C);
         assert_eq!(apply(&m, 50.0, 25.0), Vec2::new(50.0, 25.0), "centre stays put");
         assert_eq!(apply(&m, 100.0, 25.0), Vec2::new(100.0, 35.0));
     }
 
     #[test]
+    fn rotation_and_alt_scale_turn_about_the_moved_transformation_point() {
+        // Pivot on the top-left corner: it stays put while the opposite corner swings round it.
+        let m = xf_total(XfKind::Rotate, B, pos2(100.0, 0.0), pos2(0.0, 100.0), false, false, [0.0, 0.0]);
+        assert!(apply(&m, 0.0, 0.0).distance(Vec2::new(0.0, 0.0)) < 1e-3);
+        assert!(apply(&m, 100.0, 0.0).distance(Vec2::new(0.0, 100.0)) < 1e-3, "a quarter turn clockwise");
+        let m = xf_total(XfKind::Scale { hx: 1, hy: 0 }, B, pos2(100.0, 25.0), pos2(150.0, 25.0), false, true, [0.0, 25.0]);
+        assert_eq!(apply(&m, 0.0, 25.0), Vec2::new(0.0, 25.0), "Alt scales about the point, not the centre");
+        assert_eq!(apply(&m, 100.0, 25.0).x, 150.0);
+    }
+
+    #[test]
+    fn the_transformation_point_snaps_to_the_box_and_can_leave_it() {
+        assert_eq!(snap_pivot(B, [3.0, 2.0], 10.0), [0.0, 0.0], "corner");
+        assert_eq!(snap_pivot(B, [52.0, 1.0], 10.0), [50.0, 0.0], "edge middle");
+        assert_eq!(snap_pivot(B, [48.0, 27.0], 10.0), [50.0, 25.0], "centre");
+        assert_eq!(snap_pivot(B, [-60.0, 90.0], 10.0), [-60.0, 90.0], "free outside the frame");
+    }
+
+    #[test]
     fn zones() {
         let r = Rect::from_min_max(pos2(100.0, 100.0), pos2(300.0, 200.0));
-        assert_eq!(xf_zone(r, pos2(300.0, 200.0)), Some(XfKind::Scale { hx: 1, hy: 1 }));
-        assert_eq!(xf_zone(r, pos2(200.0, 100.0)), Some(XfKind::Scale { hx: 0, hy: -1 }));
-        assert_eq!(xf_zone(r, pos2(150.0, 101.0)), Some(XfKind::Skew { hx: 0, hy: -1 }));
-        assert_eq!(xf_zone(r, pos2(150.0, 199.0)), Some(XfKind::Skew { hx: 0, hy: 1 }));
-        assert_eq!(xf_zone(r, pos2(99.0, 130.0)), Some(XfKind::Skew { hx: -1, hy: 0 }));
-        assert_eq!(xf_zone(r, pos2(301.0, 130.0)), Some(XfKind::Skew { hx: 1, hy: 0 }));
-        assert_eq!(xf_zone(r, pos2(312.0, 212.0)), Some(XfKind::Rotate));
-        assert_eq!(xf_zone(r, pos2(200.0, 150.0)), Some(XfKind::Move));
-        assert_eq!(xf_zone(r, pos2(500.0, 500.0)), None);
+        assert_eq!(xf_zone(r, r.center(), pos2(300.0, 200.0)), Some(XfKind::Scale { hx: 1, hy: 1 }));
+        assert_eq!(xf_zone(r, r.center(), pos2(203.0, 152.0)), Some(XfKind::Pivot));
+        assert_eq!(xf_zone(r, pos2(300.0, 200.0), pos2(300.0, 200.0)), Some(XfKind::Pivot), "the point wins over a handle");
+        assert_eq!(xf_zone(r, pos2(500.0, 500.0), pos2(497.0, 503.0)), Some(XfKind::Pivot), "out in the open");
+        assert_eq!(xf_zone(r, r.center(), pos2(200.0, 100.0)), Some(XfKind::Scale { hx: 0, hy: -1 }));
+        assert_eq!(xf_zone(r, r.center(), pos2(150.0, 101.0)), Some(XfKind::Skew { hx: 0, hy: -1 }));
+        assert_eq!(xf_zone(r, r.center(), pos2(150.0, 199.0)), Some(XfKind::Skew { hx: 0, hy: 1 }));
+        assert_eq!(xf_zone(r, r.center(), pos2(99.0, 130.0)), Some(XfKind::Skew { hx: -1, hy: 0 }));
+        assert_eq!(xf_zone(r, r.center(), pos2(301.0, 130.0)), Some(XfKind::Skew { hx: 1, hy: 0 }));
+        assert_eq!(xf_zone(r, r.center(), pos2(312.0, 212.0)), Some(XfKind::Rotate));
+        assert_eq!(xf_zone(r, r.center(), pos2(150.0, 130.0)), Some(XfKind::Move));
+        assert_eq!(xf_zone(r, r.center(), pos2(500.0, 500.0)), None);
     }
 }
