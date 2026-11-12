@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+* **Free Transform: movable transformation point** (#178). Drag the point at the centre of the
+  selection box to move it, even outside the box; it snaps to the corners, edge middles and centre
+  (hold Alt to place it freely) and double-clicking it centres it again. Rotation, and Alt-scaling,
+  turn about it, and it travels with the artwork. It is view state for now, not saved in the file.
 * **Publish Settings and Publish** (ADR 0060, M8).
   * **File › Publish Settings** (Ctrl+Shift+F12) is a window that stays open while you work.
     It lists every format AniCraft exports (HTML canvas, animated GIF, video, Lottie, sprite

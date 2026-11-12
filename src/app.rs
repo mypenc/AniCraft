@@ -129,7 +129,7 @@ impl Tool {
             Tool::Eraser => tr_noop!("Drag to erase lines and fills drawn with Object Drawing off (drawing objects and symbols are kept). [ and ] change the size; the options set the shape and erase mode, and the Faucet deletes a whole fill or line with a click. Double-click the tool to erase everything on the stage."),
             Tool::Width => tr_noop!("Hover a stroke to see its width points. Drag a point's handle to widen or narrow the stroke there (Alt: one side only), drag its dot to slide it along, or drag anywhere on the stroke to add a point. Click a point and press Delete to remove it."),
             Tool::Bone => tr_noop!("Drag from one symbol instance to another to join them with a bone (they move to an armature layer); start on a bone's end to continue the chain. Click a bone to select it. Pose the armature by dragging bones or instances with the Selection tool."),
-            Tool::Transform => tr_noop!("Drag a corner or edge to scale (Shift keeps proportions, Alt scales from the centre), just outside a corner to rotate (Shift snaps 15°), inside to move."),
+            Tool::Transform => tr_noop!("Drag a corner or edge to scale (Shift keeps proportions, Alt scales from the transformation point), just outside a corner to rotate about it (Shift snaps 15°), inside to move. Drag the transformation point to move it (it snaps to the box; Alt places it freely); double-click it to centre it again."),
             Tool::Rect => tr_noop!("Drag to draw a rectangle. Shift draws a square."),
             Tool::Oval => tr_noop!("Drag to draw an oval. Shift draws a circle."),
             Tool::Star => tr_noop!("Drag from the centre to draw a star."),
@@ -216,6 +216,8 @@ pub enum Drag {
     Width { id: anicraft_engine::doc::ElementId, sub: usize, index: usize, grip: crate::widthtool::Grip, start: (f32, f32) },
     /// Free transform: `applied` is the transform already sent to the engine this gesture.
     Transform { kind: XfKind, start: egui::Pos2, bounds: [f32; 4], applied: anicraft_engine::geom::Affine },
+    /// Moving Free Transform's transformation point (#178): view state, not an edit.
+    Pivot,
     /// Dragging shape hint `index` on the side the frame shows (ADR 0023).
     Hint { index: usize, side: anicraft_engine::doc::HintSide },
     /// Editing the motion path (ADR 0030) from stage point `start`; the path as it was when the
@@ -247,6 +249,8 @@ pub enum XfKind {
     /// Handle position: -1/0/1 on each axis (corner, edge or centre).
     Scale { hx: i8, hy: i8 },
     Rotate,
+    /// The transformation point: dragging it moves the point the box rotates about (#178).
+    Pivot,
 }
 
 /// A small text prompt standing in for native file dialogs (M0).
@@ -332,6 +336,9 @@ pub struct App {
     /// bend or point drag changed (merged again when it ends; ADR 0041).
     pub raw_points: serde_json::Value,
     pub raw_touched: Vec<u64>,
+    /// Free Transform's transformation point for one selection, as a fraction of its box
+    /// (0.5, 0.5 is the centre) so it follows the artwork when that moves (#178). View state.
+    pub xf_pivot: Option<(anicraft_engine::Selection, [f32; 2])>,
     /// A Subselection point drag: the other selected anchors that move with the one dragged
     /// (`raw.move_point`'s `with`, ADR 0042).
     pub raw_with: Vec<anicraft_engine::geom::Vec2>,
@@ -533,6 +540,7 @@ impl App {
             pencil: Vec::new(),
             raw_points: serde_json::Value::Null,
             raw_touched: Vec::new(),
+            xf_pivot: None,
             raw_with: Vec::new(),
             raw_anchors: Vec::new(),
             raw_ends: Vec::new(),
