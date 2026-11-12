@@ -129,7 +129,7 @@ impl Tool {
             Tool::Eraser => tr_noop!("Drag to erase lines and fills drawn with Object Drawing off (drawing objects and symbols are kept). [ and ] change the size; the options set the shape and erase mode, and the Faucet deletes a whole fill or line with a click. Double-click the tool to erase everything on the stage."),
             Tool::Width => tr_noop!("Hover a stroke to see its width points. Drag a point's handle to widen or narrow the stroke there (Alt: one side only), drag its dot to slide it along, or drag anywhere on the stroke to add a point. Click a point and press Delete to remove it."),
             Tool::Bone => tr_noop!("Drag from one symbol instance to another to join them with a bone (they move to an armature layer); start on a bone's end to continue the chain. Click a bone to select it. Pose the armature by dragging bones or instances with the Selection tool."),
-            Tool::Transform => tr_noop!("Drag a handle to scale (Shift keeps proportions, Alt scales from the centre), a line between handles to skew (Alt skews about the centre), just outside a corner to rotate (Shift snaps 15°), inside to move."),
+            Tool::Transform => tr_noop!("Drag a handle to scale (Shift keeps proportions, Alt scales from the transformation point), a line between handles to skew (Alt skews about it), just outside a corner to rotate about it (Shift snaps 15°), inside to move. Drag the transformation point to move it (it snaps to the box; Alt places it freely); double-click it to centre it again.");
             Tool::Rect => tr_noop!("Drag to draw a rectangle. Shift draws a square."),
             Tool::Oval => tr_noop!("Drag to draw an oval. Shift draws a circle."),
             Tool::Star => tr_noop!("Drag from the centre to draw a star."),
@@ -216,6 +216,8 @@ pub enum Drag {
     Width { id: anicraft_engine::doc::ElementId, sub: usize, index: usize, grip: crate::widthtool::Grip, start: (f32, f32) },
     /// Free transform: `applied` is the transform already sent to the engine this gesture.
     Transform { kind: XfKind, start: egui::Pos2, bounds: [f32; 4], applied: anicraft_engine::geom::Affine },
+    /// Moving Free Transform's transformation point (#178): view state, not an edit.
+    Pivot,
     /// Dragging shape hint `index` on the side the frame shows (ADR 0023).
     Hint { index: usize, side: anicraft_engine::doc::HintSide },
     /// Editing the motion path (ADR 0030) from stage point `start`; the path as it was when the
@@ -250,6 +252,8 @@ pub enum XfKind {
     /// Dragging the line between two handles shears along that edge (the sign is which edge:
     /// `hx` is -1/1 on the left/right edge, `hy` is -1/1 on the top/bottom, the other is 0).
     Skew { hx: i8, hy: i8 },
+    /// The transformation point: dragging it moves the point the box rotates about (#178).
+    Pivot,
 }
 
 /// A small text prompt standing in for native file dialogs (M0).
@@ -335,6 +339,9 @@ pub struct App {
     /// bend or point drag changed (merged again when it ends; ADR 0041).
     pub raw_points: serde_json::Value,
     pub raw_touched: Vec<u64>,
+    /// Free Transform's transformation point for one selection, as a fraction of its box
+    /// (0.5, 0.5 is the centre) so it follows the artwork when that moves (#178). View state.
+    pub xf_pivot: Option<(anicraft_engine::Selection, [f32; 2])>,
     /// A Subselection point drag: the other selected anchors that move with the one dragged
     /// (`raw.move_point`'s `with`, ADR 0042).
     pub raw_with: Vec<anicraft_engine::geom::Vec2>,
@@ -392,6 +399,8 @@ pub struct App {
     pub show_actions: bool,
     /// Edit › Find and Replace (Ctrl+F) and its results (ADR 0058).
     pub find: crate::find_panel::FindState,
+    /// File › Publish Settings and the publish running or last run (ADR 0060).
+    pub publish: crate::publish_panel::PublishState,
     /// Window › Movie Explorer, the Library dock's other tab (ADR 0058).
     pub explorer: crate::movie_explorer::ExplorerView,
     pub actions: crate::actions_panel::State,
@@ -534,6 +543,7 @@ impl App {
             pencil: Vec::new(),
             raw_points: serde_json::Value::Null,
             raw_touched: Vec::new(),
+            xf_pivot: None,
             raw_with: Vec::new(),
             raw_anchors: Vec::new(),
             raw_ends: Vec::new(),
@@ -566,6 +576,7 @@ impl App {
             show_plugins: false,
             show_actions: false,
             find: Default::default(),
+            publish: Default::default(),
             explorer: Default::default(),
             actions: crate::actions_panel::State::default(),
             test_movie: None,
@@ -825,6 +836,23 @@ impl App {
                 self.find.text = "ball".into();
                 self.find.with = "planet".into();
                 crate::find_panel::step(self, true);
+            }
+            Some("publish") | Some("publishreport") => {
+                // Publish Settings (ADR 0060) on the sample, saved in a temporary folder: the GIF
+                // on and its options showing; or the report of publishing it (the HTML page and
+                // a small GIF, the soundtrack skipped: the sample has no sounds).
+                let dir = std::env::temp_dir().join("anicraft-publish-shot");
+                let _ = std::fs::create_dir_all(&dir);
+                self.s.path = Some(dir.join("walk.anicraft"));
+                self.run("publish.settings_set", json!({"format": "gif", "enabled": true, "scale": 0.5, "from": 0, "to": 23}));
+                self.run("publish.settings_set", json!({"format": "audio", "enabled": true}));
+                self.prefs.publish_presets.insert("Web banner".into(), (*self.s.doc.publish).clone()); // i18n-exempt: a sample preset name the user typed
+                self.publish.selected = anicraft_engine::doc::publish::PublishFormat::Gif;
+                if which == Some("publish") {
+                    crate::publish_panel::open(self);
+                } else {
+                    crate::publish_panel::publish_now(self);
+                }
             }
             Some("explorer") => {
                 // The Movie Explorer tab (ADR 0058), its first rows open: scene, layers, keyframes
@@ -1540,6 +1568,11 @@ impl App {
 
     /// Runs a command and reports the outcome; routine destructive edits say how to undo.
     pub fn perform(&mut self, id: &str, params: Value) -> Option<Value> {
+        if id == "file.publish" {
+            // File › Publish runs in the background, with its own progress view (ADR 0060).
+            crate::publish_panel::start(self, &params);
+            return None;
+        }
         let selected = self.s.selection.len();
         // A browser's autosaved copy opens as a file (ADR 0036): it is a restore all the same.
         let restored = autosave::restored_session(id, &params);
@@ -1765,6 +1798,12 @@ impl App {
         if id == "find.search" {
             // Edit › Find and Replace (Ctrl+F): its window (headless, the command searches).
             crate::find_panel::open(self);
+            return;
+        }
+        if id == "publish.settings_get" {
+            // File › Publish Settings (Ctrl+Shift+F12): its window (headless, the command
+            // returns the settings).
+            crate::publish_panel::open(self);
             return;
         }
         if id == "control.test_movie" {
@@ -2400,6 +2439,7 @@ impl App {
         crate::plugins_ui::show(self, &ctx);
         crate::actions_panel::show(self, &ctx);
         crate::find_panel::show(self, &ctx);
+        crate::publish_panel::show(self, &ctx);
         crate::test_movie::show(self, &ctx);
         crate::envelope::show(self, &ctx);
 
