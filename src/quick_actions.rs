@@ -120,6 +120,7 @@ fn show_tab(app: &mut App, ctx: &egui::Context) {
     let y = at.y.min(screen.bottom() - 44.0).max(screen.top());
     let mut open = false;
     egui::Area::new(egui::Id::new("anicraft_quick_q")).order(egui::Order::Foreground).fixed_pos(egui::pos2(x, y)).show(ctx, |ui| {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(2)).show(ui, |ui| {
             if ui.add(egui::Button::new(egui::RichText::new("Q").strong().size(16.0)).min_size(egui::vec2(40.0, 34.0))).on_hover_text(tr!("Quick actions")).clicked() {
                 open = true;
@@ -169,9 +170,13 @@ fn show_panel(app: &mut App, ctx: &egui::Context) {
         egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
             ui.set_width(width);
             ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+            // Never wrap inside a word. At the end of a row egui hands a widget whatever width is
+            // left, and a label or button that wraps in that sliver breaks into one letter a line.
+            // Buttons that don't fit move to the next row whole instead (`horizontal_wrapped`).
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(tr!("Quick actions")).strong().size(12.0));
-                ui.label(egui::RichText::new(tr!("Hold a button to pin it")).weak().size(11.0));
+                ui.add(egui::Label::new(egui::RichText::new(tr!("Hold a button to pin it")).weak().size(11.0)).truncate());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.add(egui::Button::new("✕").min_size(egui::vec2(30.0, 26.0))).clicked() {
                         close = true;

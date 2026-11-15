@@ -370,7 +370,10 @@ const VOLUME_W: f32 = 56.0;
 /// and tween buttons, `width` wide at most. What doesn't fit scrolls sideways (Shift+wheel) in
 /// a small window or at a large interface scale, instead of being cut off.
 pub fn header_tools(app: &mut App, ui: &mut egui::Ui, width: f32) {
-    let out = egui::ScrollArea::horizontal().id_salt("tl_header").max_width(width.max(40.0)).show(ui, |ui| ui.horizontal(|ui| header(app, ui)));
+    // On a touch screen the strip scrolls by dragging it, so it shows no bar: even a floating one
+    // sits over the bottom edge of the buttons and takes the taps meant for them.
+    let bars = if app.touch.enabled { egui::scroll_area::ScrollBarVisibility::AlwaysHidden } else { egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded };
+    let out = egui::ScrollArea::horizontal().id_salt("tl_header").max_width(width.max(40.0)).scroll_bar_visibility(bars).show(ui, |ui| ui.horizontal(|ui| header(app, ui)));
     app.tl_header_spill = out.content_size.x - out.inner_rect.width();
 }
 

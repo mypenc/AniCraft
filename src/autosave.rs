@@ -46,6 +46,10 @@ pub struct Recovery {
     pub show: bool,
     /// The session whose Discard is waiting for its second click.
     confirm_discard: Option<String>,
+    /// Why the last Restore did not open anything, shown in the window itself: the status bar
+    /// can be out of sight (a phone's compact layout, the start screen), and a Restore that
+    /// fails silently looks like a button that does nothing.
+    restore_error: Option<String>,
     /// In a browser: the list of copies is on its way; `true` when the user asked for it (so
     /// an empty one is said).
     #[cfg(target_arch = "wasm32")]
@@ -224,7 +228,16 @@ fn restore(app: &mut App, id: String) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let dir = app.recovery.dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
-        app.request("file.recover", json!({"dir": dir, "session": id}));
+        app.status = None;
+        app.request("file.recover", json!({"dir": dir, "session": id.clone()}));
+        // `restored` takes the entry off the list, so one still there means nothing opened. The
+        // exception is a question waiting for the answer (unsaved changes to replace).
+        if app.confirm.is_none() && app.recovery.found.iter().any(|e| e.session == id) {
+            app.recovery.restore_error = Some(match app.status.as_ref() {
+                Some(st) if st.error => st.text.clone(),
+                _ => tr!("Could not restore this copy.").to_string(),
+            });
+        }
     }
 }
 
@@ -360,6 +373,9 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
     let confirm = app.recovery.confirm_discard.clone();
     let btn = egui::vec2(96.0, crate::theme::TARGET + 4.0);
     let title = tr!("Recover unsaved work");
+    // Never wider than the screen: on a phone a fixed 520 pushed the Restore button (the
+    // rightmost) out of view.
+    let width = (ctx.content_rect().width() - 24.0).clamp(240.0, 520.0);
     let shown = egui::Window::new(title)
         .id(egui::Id::new("recover_window"))
         .open(&mut open)
@@ -367,9 +383,10 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
         .resizable(false)
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.content_rect().center())
-        .default_width(520.0)
+        .default_width(width)
+        .constrain(true)
         .show(ctx, |ui| {
-            ui.set_width(520.0);
+            ui.set_width(width);
             let lead = trn!(
                 "AniCraft didn't close properly last time. This document had changes that weren't saved:",
                 "AniCraft didn't close properly last time. These documents had changes that weren't saved:",
@@ -428,6 +445,9 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
                 });
                 ui.add_space(6.0);
             }
+            if let Some(why) = &app.recovery.restore_error {
+                ui.label(text(Type::Caption, why.clone()).color(T.error));
+            }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if ui.add(egui::Button::new(tr!("Later")).min_size(btn)).clicked() {
@@ -443,6 +463,7 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
     match act {
         Some(Act::Restore(id)) => {
             app.recovery.confirm_discard = None;
+            app.recovery.restore_error = None;
             restore(app, id);
         }
         Some(Act::AskDiscard(id)) => app.recovery.confirm_discard = Some(id),

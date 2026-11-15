@@ -367,6 +367,16 @@ impl FrameCache {
         }
     }
 
+    /// Drops the images under `keys` (pictures of a state nothing will show again, such as the
+    /// steps of a drag the next step has replaced).
+    pub fn remove(&mut self, keys: &[u64]) {
+        for key in keys {
+            if let Some((old, _)) = self.map.remove(key) {
+                self.forget(&old);
+            }
+        }
+    }
+
     fn forget(&mut self, img: &FrameImage) {
         let (cpu, gpu) = cost(img);
         self.bytes = self.bytes.saturating_sub(cpu);
@@ -405,10 +415,20 @@ struct Shared {
     notify: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
-/// Default image-cache budget.
-pub const DEFAULT_CACHE_BYTES: usize = 768 * 1024 * 1024;
-/// Default budget for pictures a rasterizer keeps on the GPU (graphics memory is scarcer).
-pub const DEFAULT_NATIVE_CACHE_BYTES: usize = 384 * 1024 * 1024;
+/// Default image-cache budget. A tile is about 1 MB, so this holds a few screens of tiles plus
+/// look-ahead. It was 768 MB, which a single scribble could fill: every step of a drag is a new
+/// document state with tiles of its own, and an LRU cache keeps those until it is full. Phones
+/// and browsers have far less memory to give than a desktop.
+#[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
+pub const DEFAULT_CACHE_BYTES: usize = 96 * 1024 * 1024;
+#[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
+pub const DEFAULT_CACHE_BYTES: usize = 192 * 1024 * 1024;
+/// Default budget for pictures a rasterizer keeps on the GPU (graphics memory is scarcer, and
+/// on a phone it is the same memory as everything else).
+#[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
+pub const DEFAULT_NATIVE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
+pub const DEFAULT_NATIVE_CACHE_BYTES: usize = 128 * 1024 * 1024;
 /// Most jobs the worker renders in one parallel pass.
 const BATCH: usize = 32;
 
@@ -573,6 +593,11 @@ impl RenderService {
     pub fn busy(&self) -> bool {
         let q = self.queue();
         !q.busy.is_empty() || !q.urgent.is_empty() || !q.prefetch.is_empty()
+    }
+
+    /// Frees the cached pictures under `keys` right away, instead of leaving them to age out.
+    pub fn forget(&self, keys: &[u64]) {
+        self.cache().remove(keys);
     }
 
     /// `(images, bytes, hits, misses)`.
@@ -807,6 +832,20 @@ mod tests {
         }
         assert!(c.bytes() <= 3000);
         assert!(c.contains(9) && !c.contains(0));
+    }
+
+    /// The steps of a drag are freed as the next one lands, not left to fill the budget.
+    #[test]
+    fn removed_pictures_free_their_bytes() {
+        let mut c = FrameCache::new(1 << 20);
+        for k in 0..4u64 {
+            c.insert(Arc::new(FrameImage { key: k, frame: 0, width: 0, height: 0, rgba_premul: vec![0; 800], native: None, ms: 0.0, stats: RenderStats::default(), error: None, gpu: false, fallback: None }));
+        }
+        let before = c.bytes();
+        c.remove(&[1, 2, 99]);
+        assert_eq!(c.len(), 2);
+        assert!(c.contains(0) && c.contains(3) && !c.contains(1) && !c.contains(2));
+        assert_eq!(c.bytes(), before / 2, "two of four equal pictures left");
     }
 
     #[test]

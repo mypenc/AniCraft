@@ -25,8 +25,12 @@ const IMMEDIATE_BUDGET_MS: f32 = 12.0;
 /// Tile edge in device pixels: big enough to keep per-tile overhead low, small enough that a
 /// pan only needs a strip of new tiles.
 pub const TILE: u32 = 512;
-/// Tile textures kept on the GPU (≈ 1 MB each); least recently used ones are dropped.
-const MAX_TILE_TEXTURES: usize = 192;
+/// Tile textures kept (about 1 MB each): the visible ones and a few screens of older ones that
+/// stand in while a pan or zoom renders. 192 was more than a phone has to give.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+const MAX_TILE_TEXTURES: usize = 64;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const MAX_TILE_TEXTURES: usize = 96;
 
 /// A finished tile on the GPU.
 struct TileTex {
@@ -69,11 +73,13 @@ pub struct Cache {
     pub drawn_by: Option<(bool, Option<String>)>,
     /// The selection pattern's texture and the colour it was made in (`selection_pattern`).
     pattern: Option<(Color32, egui::TextureHandle)>,
+    /// The tile keys of the previous frame, to free the pictures a drag has moved past.
+    last_keys: Vec<u64>,
 }
 
 impl Default for Cache {
     fn default() -> Self {
-        Cache { tiles: Vec::new(), tick: 0, ms: 0.0, ready: (0, 0), canvas: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), service: None, shown_state: None, gpu: Default::default(), drawn_by: None, pattern: None }
+        Cache { tiles: Vec::new(), tick: 0, ms: 0.0, ready: (0, 0), canvas: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)), service: None, shown_state: None, gpu: Default::default(), drawn_by: None, pattern: None, last_keys: Vec::new() }
     }
 }
 
@@ -1013,6 +1019,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.stage_cache.ready = (ready, keys.len());
         if ready == keys.len() {
             app.stage_cache.shown_state = Some(state);
+            // During a gesture (a brush stroke, a drag) every step is a new state whose pictures
+            // nothing asks for again. Left to the cache they pile up to its budget, which is how
+            // one scribble came to hold hundreds of MB. Free them once the new step is on screen.
+            if app.s.in_gesture() {
+                let old: Vec<u64> = app.stage_cache.last_keys.iter().copied().filter(|k| !keys.contains(k)).collect();
+                if !old.is_empty() {
+                    if let Some(svc) = &app.stage_cache.service {
+                        svc.forget(&old);
+                    }
+                    app.stage_cache.tiles.retain(|t| !old.contains(&t.key));
+                }
+            }
+            app.stage_cache.last_keys = keys.clone();
         }
 
         // Look-ahead: the ring of tiles around the view (a pan reveals them instantly) and,
