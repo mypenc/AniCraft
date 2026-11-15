@@ -3739,6 +3739,7 @@ impl App {
             self.glyph_check = false;
         }
         self.press_scripted_key(&ctx);
+        self.touch.bar_visible = self.prefs.touch_bar;
         self.touch.apply_style(&ctx);
         // Two-finger tap, three-finger tap and the bar's buttons.
         for action in self.touch.take_actions() {

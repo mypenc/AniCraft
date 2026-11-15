@@ -786,12 +786,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
         }
 
-    // A finger's long press is this right click: besides the menu, the quick-action panel
-    // (Insert Keyframe / Frame / Blank Keyframe and the rest) opens; the next tap on the stage
-    // puts it away again.
+    // A finger's long press is this right click: beside the menu a small Q tab offers the
+    // quick-action panel (Insert Keyframe / Frame / Blank Keyframe and the rest); the next tap
+    // on the stage puts it away again.
     if app.touch.enabled {
         if resp.secondary_clicked() && !preview {
-            app.quick.open();
+            if let Some(at) = resp.interact_pointer_pos() {
+                app.quick.offer(at);
+            }
         } else if resp.clicked() || resp.drag_started() {
             app.quick.close();
         }

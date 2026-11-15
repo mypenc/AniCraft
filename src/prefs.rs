@@ -148,6 +148,12 @@ pub struct Prefs {
     pub recent: anicraft_engine::cmds_recent::RecentFiles,
     /// Show the start screen when AniCraft starts without a document to open (ADR 0059).
     pub start_screen: bool,
+    /// Android: the on-screen Shift / Ctrl / Alt / Space bar (Help › Touch Bar).
+    pub touch_bar: bool,
+    /// Android: hide the status bar and draw into the notch (Help › Full Screen).
+    pub fullscreen: bool,
+    /// Android: shortcuts pinned to the stage from the quick actions: command id and position.
+    pub quick_pins: Vec<(String, f32, f32)>,
     /// Brushes of your own (ADR 0068), for the Brush and the Paint Brush.
     #[serde(deserialize_with = "lenient_brushes")]
     pub brushes: anicraft_engine::brush_library::BrushLibrary,
@@ -223,7 +229,8 @@ impl Default for Prefs {
             data_font: FontChoice::Bundled,
             theme: crate::theme::Palette::Graphite,
             theme_follows_system: None,
-            ui_scale: 1.0,
+            // A phone's screen is small: Android starts at the smallest scale.
+            ui_scale: if cfg!(target_os = "android") { 0.75 } else { 1.0 },
             render_mode: RenderMode::Auto,
             stage_renderer: StageRenderer::Gpu,
             window_backend: WindowBackend::Auto,
@@ -238,6 +245,9 @@ impl Default for Prefs {
             publish_presets: Default::default(),
             recent: Default::default(),
             start_screen: true,
+            touch_bar: true,
+            fullscreen: true,
+            quick_pins: Vec::new(),
             brushes: Default::default(),
             filter_presets: Default::default(),
             test_movie_window: true,

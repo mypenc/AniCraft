@@ -8,7 +8,10 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
+import android.os.Build
 import android.util.Log
+import android.view.WindowManager
+import androidx.core.view.WindowInsetsControllerCompat
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.View
@@ -40,6 +43,7 @@ class MainActivity : GameActivity() {
     private lateinit var exports: Exports
     private var loadingView: View? = null
     private var loadingBar: ProgressBar? = null
+    @Volatile private var fullscreen = true
 
     private class Request(val id: Long, val arg: String)
 
@@ -74,16 +78,48 @@ class MainActivity : GameActivity() {
         super.onCreate(savedInstanceState)
         val content = findViewById<View>(android.R.id.content)
         ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
-            val bars: Insets = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            // Full screen: the system bars are hidden, so only the notch / camera cut-out is kept
+            // clear; the window colour fills behind it, so there is no gap.
+            val bars: Insets = if (fullscreen) insets.getInsets(WindowInsetsCompat.Type.displayCutout())
+                else insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
             WindowInsetsCompat.CONSUMED
         }
+        applyFullscreen(true) // Rust corrects this on its first frame if the preference is off
         ViewCompat.requestApplyInsets(content)
         showLoading()
         exports = Exports(applicationContext)
         DebugLog.install(this)
         handleViewIntent(intent)
     }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && fullscreen) applyFullscreen(true) // the system shows the bars again after a dialog
+    }
+
+    private fun applyFullscreen(on: Boolean) {
+        fullscreen = on
+        val lp = window.attributes
+        lp.layoutInDisplayCutoutMode = when {
+            !on -> WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+            Build.VERSION.SDK_INT >= 30 -> WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            else -> WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+        window.attributes = lp
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        if (on) {
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            controller.show(WindowInsetsCompat.Type.systemBars())
+        }
+        ViewCompat.requestApplyInsets(findViewById(android.R.id.content))
+    }
+
+    /** Help > Full Screen: hide the status / navigation bars and draw into the notch area. */
+    @Suppress("unused")
+    fun setFullscreen(on: Boolean) = runOnUiThread { applyFullscreen(on) }
 
     override fun onDestroy() {
         if (isFinishing) DebugLog.markClean(this)

@@ -138,7 +138,7 @@ fn android_main(app: AndroidApp) {
             // Single-line fields, no word suggestions (they re-send each word per keystroke).
             host.set_ime_editor_info(InputType::from_bits_retain(0x1 | 0x8_0000), TextInputAction::None, ImeOptions::from_bits_retain(0x4000_0000 | 0x1000_0000));
             set_loading_progress(&host, 85);
-            Ok(Box::new(Host { app: a, android: host, loading_hidden: false, last_copied: String::new() }))
+            Ok(Box::new(Host { app: a, android: host, loading_hidden: false, last_copied: String::new(), fullscreen: true }))
         }),
     );
     if let Err(e) = result {
@@ -191,6 +191,8 @@ struct Host {
     android: AndroidApp,
     loading_hidden: bool,
     last_copied: String,
+    /// What Android was last told for Help › Full Screen (it starts full screen).
+    fullscreen: bool,
 }
 
 impl eframe::App for Host {
@@ -204,6 +206,11 @@ impl eframe::App for Host {
         }
         self.app.ui(ui, frame);
         let ctx = ui.ctx().clone();
+        // Help > Full Screen.
+        if self.app.prefs.fullscreen != self.fullscreen {
+            self.fullscreen = self.app.prefs.fullscreen;
+            with_activity(&self.android, |env, activity| env.call_method(activity, "setFullscreen", "(Z)V", &[JValue::Bool(u8::from(self.fullscreen))]).map(|_| ()));
+        }
         // The bar's KB button opens the on-screen keyboard by force.
         if std::mem::take(&mut self.app.touch.keyboard_request) {
             call_void(&self.android, "forceShowSoftKeyboard");

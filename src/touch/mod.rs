@@ -266,12 +266,12 @@ impl Touch {
         }
         self.style_dirty = false;
         ctx.all_styles_mut(|s| {
-            s.spacing.interact_size = egui::vec2(s.spacing.interact_size.x.max(40.0), s.spacing.interact_size.y.max(34.0));
-            s.spacing.button_padding = egui::vec2(s.spacing.button_padding.x.max(10.0), s.spacing.button_padding.y.max(6.0));
-            s.spacing.item_spacing = egui::vec2(s.spacing.item_spacing.x.max(8.0), s.spacing.item_spacing.y.max(6.0));
-            s.spacing.icon_width = s.spacing.icon_width.max(22.0);
+            s.spacing.interact_size = egui::vec2(s.spacing.interact_size.x.max(30.0), s.spacing.interact_size.y.max(26.0));
+            s.spacing.button_padding = egui::vec2(s.spacing.button_padding.x.max(6.0), s.spacing.button_padding.y.max(3.0));
+            s.spacing.item_spacing = egui::vec2(s.spacing.item_spacing.x.max(5.0), s.spacing.item_spacing.y.max(3.0));
+            s.spacing.icon_width = s.spacing.icon_width.max(18.0);
             s.spacing.icon_width_inner = s.spacing.icon_width_inner.max(12.0);
-            s.spacing.scroll.bar_width = s.spacing.scroll.bar_width.max(12.0);
+            s.spacing.scroll.bar_width = s.spacing.scroll.bar_width.max(10.0);
             s.interaction.interact_radius = s.interaction.interact_radius.max(10.0);
             s.interaction.resize_grab_radius_side = s.interaction.resize_grab_radius_side.max(14.0);
             s.interaction.resize_grab_radius_corner = s.interaction.resize_grab_radius_corner.max(18.0);
@@ -286,8 +286,8 @@ impl Touch {
             return;
         }
         let k = self.bar_scale.clamp(Self::BAR_SCALE_MIN, Self::BAR_SCALE_MAX);
-        let min = egui::vec2(46.0 * k, 40.0 * k);
-        let text = move |label: &str| egui::RichText::new(label).size(14.0 * k);
+        let min = egui::vec2(36.0 * k, 30.0 * k);
+        let text = move |label: &str| egui::RichText::new(label).size(12.0 * k);
         let screen = ctx.content_rect();
         // Not `anchor`: an anchor puts the bar back every frame, undoing a drag. The default
         // position is only the first one; after that egui remembers where it was dragged.

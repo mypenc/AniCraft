@@ -743,6 +743,18 @@ pub(crate) fn menu_contents(app: &mut App, ui: &mut egui::Ui, top: &str, cmds: &
             if ui_item(ui, tr!("Check for Updates…"), "", None) {
                 app.updates.check(ui.ctx());
             }
+            // Touch settings, where there is a touchscreen (on by default on Android).
+            if app.touch.enabled {
+                if ui_item(ui, tr!("Touch Bar"), "", Some(app.prefs.touch_bar)) {
+                    app.prefs.touch_bar = !app.prefs.touch_bar;
+                    app.save_prefs();
+                }
+                if platform::ANDROID && ui_item(ui, tr!("Full Screen"), "", Some(app.prefs.fullscreen)) {
+                    app.prefs.fullscreen = !app.prefs.fullscreen;
+                    app.save_prefs();
+                }
+                ui.separator();
+            }
             if ui_item(ui, tr!("Command Palette…"), "Ctrl+K", None) {
                 app.palette = Some(crate::dialogs::Palette::default());
             }
