@@ -2715,6 +2715,9 @@ impl App {
                 }
             }
             "file.recover" => {
+                // The restored work is the document now: the start screen (which a fresh start
+                // shows, with this dialog over it) must not stay up and hide it.
+                self.start = None;
                 self.view.fit = true;
                 self.frame_sel = None;
                 self.library_sel = crate::library::first_item(&self.s.doc);

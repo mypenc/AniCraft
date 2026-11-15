@@ -271,7 +271,13 @@ impl Touch {
             s.spacing.item_spacing = egui::vec2(s.spacing.item_spacing.x.max(5.0), s.spacing.item_spacing.y.max(3.0));
             s.spacing.icon_width = s.spacing.icon_width.max(18.0);
             s.spacing.icon_width_inner = s.spacing.icon_width_inner.max(12.0);
-            s.spacing.scroll.bar_width = s.spacing.scroll.bar_width.max(10.0);
+            // Thin scroll bars that float over the content and show only while scrolling: a
+            // finger scrolls by dragging the content itself, and a fat always-on bar (the
+            // timeline's header row) only got in the way of the buttons under it.
+            s.spacing.scroll = egui::style::ScrollStyle::floating();
+            s.spacing.scroll.bar_width = 8.0;
+            s.spacing.scroll.floating_width = 3.0;
+            s.spacing.scroll.handle_min_length = 24.0;
             s.interaction.interact_radius = s.interaction.interact_radius.max(10.0);
             s.interaction.resize_grab_radius_side = s.interaction.resize_grab_radius_side.max(14.0);
             s.interaction.resize_grab_radius_corner = s.interaction.resize_grab_radius_corner.max(18.0);

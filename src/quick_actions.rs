@@ -148,7 +148,7 @@ fn button(ui: &mut egui::Ui, id: &str, label: &str, on: bool, pinned: bool) -> e
                 icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center(), egui::vec2(18.0, 18.0)), icon, color);
                 resp
             } else {
-                ui.add(egui::Button::new(egui::RichText::new(label).size(12.0)).selected(pinned).min_size(size))
+                ui.add(egui::Button::new(egui::RichText::new(label).size(12.0)).wrap_mode(egui::TextWrapMode::Extend).selected(pinned).min_size(size))
             }
         })
         .inner;
