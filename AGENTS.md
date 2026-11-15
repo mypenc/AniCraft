@@ -69,7 +69,7 @@ a new crate needs a row here and in its `LAYERS` table.
    `doc::evaluate` and keep it pure.
 4. **The CPU renderer is the oracle.** Renderer changes come with analytic or golden tests. Any
    future GPU renderer is tested against it.
-5. **No unsafe** (`unsafe_code = "forbid"`).
+5. **No unsafe** (`unsafe_code = "forbid"` in the crates; `deny` in the shell package, whose only exception is `src/android_glue.rs`, the Android JNI glue: see `docs/android.md`).
 6. **Clean room.** Learn behaviour from public docs and observation only. Never copy proprietary
    code, presets, shaders or assets.
 7. **Verify UI changes visually**: `cargo run -- --screenshot shots/now.png`, then look at the PNG.

@@ -405,6 +405,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let pad_for = |cw: f32| start_pad(cw, app.prefs.timeline_start_gap);
     if ui.rect_contains_pointer(body) {
         let (zoom, hover) = ui.input(|i| (i.zoom_delta(), i.pointer.hover_pos()));
+        // A pinch zooms about the middle of the fingers, not the pointer a frame behind them.
+        let hover = app.touch.pinch(ui.ctx()).map(|p| p.from).or(hover);
         if (zoom - 1.0).abs() > 1e-4
             && let Some(h) = hover.filter(|h| h.x >= grid.left())
         {

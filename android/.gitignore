@@ -1,0 +1,7 @@
+app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+vendor/
+build/
+.gradle/
+local.properties
+app/build/
+app/src/main/jniLibs/

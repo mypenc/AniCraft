@@ -490,6 +490,12 @@ fn item(app: &mut App, ui: &mut egui::Ui, spec: &CommandSpec) {
     }
 }
 
+/// Whether a registry command can run now, by the menus' own rule (so the touch quick actions
+/// enable and dim exactly as the menu items do).
+pub fn command_enabled(app: &App, id: &str) -> bool {
+    enabled(app, id) && platform::unavailable(id).is_none()
+}
+
 /// An item was pressed: the Enter or Space that pressed it from the keyboard is used up, so it
 /// doesn't also reach what the item opens (the command palette's field, a dialog's button).
 fn pressed(ui: &egui::Ui) {

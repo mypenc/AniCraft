@@ -172,7 +172,7 @@ async fn read_picked(cmd: &'static str, file: web_sys::File) {
             Err(_) => Err(tr!("the browser could not read it").to_string()),
         }
     };
-    PICKED.with(|p| p.borrow_mut().push(Picked { cmd, name, data }));
+    PICKED.with(|p| p.borrow_mut().push(Picked { cmd, name, data, path: None, key: "path" }));
     repaint();
 }
 

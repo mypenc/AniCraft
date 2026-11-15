@@ -337,6 +337,11 @@ impl PolyStarOptions {
 pub struct App {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) updates: crate::updates::Updates,
+    /// Fingers as a mouse: the gesture layer and its on-screen bar (on by default on Android,
+    /// switched on by the first touch on any other touchscreen).
+    pub touch: crate::touch::Touch,
+    /// The stage's long-press panel: Insert Keyframe / Frame / Blank Keyframe and the rest.
+    pub quick: crate::quick_actions::Quick,
     pub s: Session,
     pub tool: Tool,
     pub view: StageView,
@@ -660,6 +665,8 @@ impl App {
         let mut app = App {
             #[cfg(not(target_arch = "wasm32"))]
             updates: Default::default(),
+            touch: crate::touch::Touch::new(),
+            quick: Default::default(),
             s: session,
             tool: Tool::Select,
             view: StageView { zoom: 1.0, pan: egui::Vec2::ZERO, fit: true, fitted: None, clip_to_stage: false },
@@ -880,6 +887,12 @@ impl App {
     /// A file the browser handed over: it goes where the command reads it, and the command runs
     /// (through `request`, so opening over unsaved work asks first).
     fn open_picked(&mut self, p: platform::Picked) {
+        // Android: the file is already on disk, at the path the picker staged.
+        if let Some(path) = p.path {
+            self.playing = false;
+            self.request(p.cmd, json!({ p.key: path.display().to_string() }));
+            return;
+        }
         // Only the name: the browser never says which folder it came from.
         let name: String = std::path::Path::new(&p.name).file_name().map_or_else(|| "file".into(), |n| n.to_string_lossy().chars().take(128).collect());
         let path = std::path::PathBuf::from(&name);
@@ -900,6 +913,7 @@ impl App {
         ctx.request_repaint();
         ctx.set_zoom_factor(self.prefs.ui_scale);
         theme::apply_palette(ctx, self.prefs.palette(self.system_look));
+        self.touch.style_dirty = true;
         crate::onion::refresh_colors(self);
         self.keymap = keymap::Keymap::new(&self.prefs.shortcuts);
         self.shortcuts = self.keymap.table();
@@ -1062,6 +1076,7 @@ impl App {
         let after = self.prefs.palette(v);
         if after != before {
             theme::apply_palette(ctx, after);
+            self.touch.style_dirty = true;
             crate::onion::refresh_colors(self);
             ctx.request_repaint();
         }
@@ -3002,6 +3017,29 @@ impl App {
         };
         if let Some((title, key, text)) = prompt {
             let is_file = matches!(key, "path" | "dir") && (id.starts_with("file.") || matches!(id, "plugin.install" | "brush.preset_export" | "brush.preset_import" | "filter.preset_export" | "filter.preset_import" | "swatch.export" | "swatch.import"));
+            if is_file && platform::ANDROID && self.shot.is_none() {
+                // The system's pickers (Storage Access Framework, via Kotlin). They answer on a
+                // later frame (`open_picked`): Open with the document copied into the app's
+                // folder, Save and Export with the place the user named, staged for the command.
+                self.playing = false;
+                #[cfg(target_os = "android")]
+                if key == "dir" {
+                    // A folder of frames can't be a single picked file: it goes to the app's
+                    // exports folder, which the Files app can open.
+                    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                    let dir = platform::android::exports_dir().join(format!("frames-{stamp}"));
+                    match std::fs::create_dir_all(&dir) {
+                        Ok(()) => {
+                            self.request(id, json!({ key: dir.display().to_string() }));
+                            self.status_ok(tr!("The frames are in {path}.", path = dir.display()));
+                        }
+                        Err(e) => self.status_err(tr!("Could not make the folder {path}: {e}", path = dir.display(), e = e)),
+                    }
+                } else {
+                    platform::android::dialog(id, key, !platform::reads_file(id), &text);
+                }
+                return;
+            }
             if is_file && platform::WEB && platform::reads_file(id) {
                 // The browser's file picker (ADR 0036). The file arrives on a later frame
                 // (`open_picked`); a save or export asks for the download's name below.
@@ -3012,7 +3050,7 @@ impl App {
             if is_file && self.prefs.native_dialogs && self.shot.is_none() && !platform::WEB {
                 // The platform's own dialog (it blocks, as native dialogs do). Cancel = no-op.
                 self.playing = false;
-                #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
                 match platform::file_dialog(id, crate::i18n::t(title), &text) {
                     Some(path) => self.request(id, json!({ key: path.display().to_string() })),
                     None => self.close_after_save = false,
@@ -3631,6 +3669,8 @@ impl eframe::App for App {
     /// Screenshots only: a click where `shot_click` says, pressed and released over two frames
     /// before they begin, as a person's would be, then a scroll to the end of what it opened.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        // Fingers become the mouse events the panels understand (a no-op without touches).
+        self.touch.process(ctx, raw);
         let Some(at) = self.shot_click.get() else { return };
         // Press, release, then scroll what opened to its end (a menu's last items).
         self.shot_step += 1;
@@ -3699,6 +3739,15 @@ impl App {
             self.glyph_check = false;
         }
         self.press_scripted_key(&ctx);
+        self.touch.apply_style(&ctx);
+        // Two-finger tap, three-finger tap and the bar's buttons.
+        for action in self.touch.take_actions() {
+            match action {
+                crate::touch::Action::Undo if self.s.can_undo() => self.invoke("edit.undo"),
+                crate::touch::Action::Redo if self.s.can_redo() => self.invoke("edit.redo"),
+                _ => {}
+            }
+        }
         // The colour pickers show the document's swatches (ADR 0078).
         crate::swatches_panel::publish_to_pickers(&ctx, self);
         self.handle_shortcuts(&ctx);
@@ -3740,6 +3789,8 @@ impl App {
             self.workspace(ui);
         }
         self.windows(&ctx);
+        crate::quick_actions::show(self, &ctx);
+        self.touch.show_bar(&ctx);
     }
 
     /// The editor's panels (ADR 0075): the edit bar and status bar, then the tools, the docks

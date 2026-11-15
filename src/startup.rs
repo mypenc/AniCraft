@@ -309,6 +309,9 @@ pub fn give_up(why: &str) {
     } else {
         tr!("AniCraft couldn't open its window with this computer's graphics driver ({why}). Updating the graphics driver usually helps. If it doesn't, please attach this file to a bug report: {log}", why = why, log = log).to_string()
     };
+    #[cfg(target_os = "android")]
+    let _ = text;
+    #[cfg(not(target_os = "android"))]
     let _ = rfd::MessageDialog::new().set_level(rfd::MessageLevel::Error).set_title(tr!("AniCraft couldn't start")).set_description(text).set_buttons(rfd::MessageButtons::Ok).show();
 }
 

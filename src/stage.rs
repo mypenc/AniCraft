@@ -237,7 +237,18 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 
     // ---- camera input -------------------------------------------------------------------
-    if resp.hovered() {
+    // The quick-action panel sits at the bottom of this area.
+    app.quick.canvas = Some(canvas);
+    // Two fingers zoom about the fingers and pan with them in the same motion, so the point
+    // between them stays under them (a mouse wheel can only do one at a time).
+    let pinch = app.touch.pinch(ui.ctx()).filter(|p| canvas.contains(p.start));
+    if let Some(p) = pinch {
+        if (p.zoom - 1.0).abs() > 1e-4 {
+            let z = app.view.zoom * p.zoom;
+            app.zoom_about(canvas, p.from, z);
+        }
+        app.view.pan += p.pan;
+    } else if resp.hovered() {
         let (zoom_delta, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
         if let Some(p) = resp.hover_pos() {
             if (zoom_delta - 1.0).abs() > 1e-4 {
@@ -775,6 +786,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
         }
 
+    // A finger's long press is this right click: besides the menu, the quick-action panel
+    // (Insert Keyframe / Frame / Blank Keyframe and the rest) opens; the next tap on the stage
+    // puts it away again.
+    if app.touch.enabled {
+        if resp.secondary_clicked() && !preview {
+            app.quick.open();
+        } else if resp.clicked() || resp.drag_started() {
+            app.quick.close();
+        }
+    }
     // Right-click: select what is under the cursor (keeping an existing multi-selection), then
     // offer the actions that apply to it.
     if resp.secondary_clicked() {

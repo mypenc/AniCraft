@@ -95,6 +95,14 @@ gpu-stage = ["dep:anicraft-gpu"]
 name = "anicraft"
 path = "src/main.rs"
 
+# The Android build (android/, ADR-style notes in docs/android.md): the same shell as a cdylib
+# that a GameActivity loads. Empty on every other target, so desktop and web builds are
+# unchanged (`src/android.rs` is `#![cfg(target_os = "android")]`).
+[lib]
+name = "anicraft_android"
+path = "src/android.rs"
+crate-type = ["cdylib"]
+
 [dependencies]
 anicraft-geom.workspace = true
 anicraft-doc.workspace = true
@@ -110,7 +118,7 @@ web-time.workspace = true
 # The system's interface language, for the default language (ADR 0040; MIT OR Apache-2.0).
 sys-locale = "0.3"
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
 # The user guide, bundled for Help › User Guide (ADR 0069). The web build serves it as pages instead.
 anicraft-guide.workspace = true
 craft-update = { git = "https://github.com/storytold/craft-libs", rev = "6ac2a6a34ae83fc0f0bfb25a569ba6388b72266a" }
@@ -118,6 +126,18 @@ craft-update = { git = "https://github.com/storytold/craft-libs", rev = "6ac2a6a
 eframe = { workspace = true, features = ["links"] }
 rfd.workspace = true
 # Sound output (Apache-2.0): WASAPI on Windows, CoreAudio on macOS, ALSA on Linux and the BSDs.
+cpal = { version = "0.18", optional = true }
+
+# Android: GameActivity brings the soft-keyboard plumbing; the JNI bridge is src/android_glue.rs.
+# No rfd (no Android backend; Kotlin's pickers instead), craft-update (an APK is updated by
+# installing the next one) or `links`.
+[target.'cfg(target_os = "android")'.dependencies]
+anicraft-guide.workspace = true
+eframe = { workspace = true, features = ["android-game-activity"] }
+android-activity = { version = "0.6", features = ["game-activity"] }
+jni = "0.21"
+log = "0.4"
+android_logger = "0.14"
 cpal = { version = "0.18", optional = true }
 
 # macOS hands a double-clicked document to the app as an Apple Event, which winit 0.30 doesn't
@@ -158,8 +178,15 @@ wat = "1.228"
 # Embeds the app icon in anicraft.exe on Windows (build.rs); does nothing on other targets.
 winresource = "0.1"
 
-[lints]
-workspace = true
+# `deny`, not the workspace's `forbid`: the Android JNI glue (`src/android_glue.rs`, the only
+# module that says `#[allow(unsafe_code)]`) cannot exist under `forbid`. Anywhere else unsafe
+# is still a compile error.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
 
 # ----- build profiles: biased for disk space, then time (docs/development.md › Build footprint) --
 

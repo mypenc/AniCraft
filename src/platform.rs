@@ -25,7 +25,7 @@ pub const OS: Os = if cfg!(target_os = "macos") {
     Os::Windows
 } else if cfg!(target_arch = "wasm32") {
     Os::Web
-} else if cfg!(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly")) {
+} else if cfg!(any(target_os = "linux", target_os = "android", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly")) {
     Os::Linux
 } else {
     Os::Other
@@ -46,6 +46,9 @@ impl Os {
 
 /// The web build runs in a browser (ADR 0036).
 pub const WEB: bool = cfg!(target_arch = "wasm32");
+
+/// The Android build: one full-screen window, fingers, and the system's file pickers.
+pub const ANDROID: bool = cfg!(target_os = "android");
 
 /// The language the system's interface is in, as a BCP 47 tag (`de-DE`, `pt-BR`): Windows'
 /// user locale, macOS' preferred languages, `LC_ALL` / `LC_MESSAGES` / `LANG` on Linux and the
@@ -507,6 +510,13 @@ pub fn save_thumbnail(key: &str, png: &[u8]) -> Result<(), String> {
 /// Why this build can't run `cmd`, if it can't: a web page can't start ffmpeg or keep files in
 /// a folder of the computer (ADR 0036). The desktop app runs everything.
 pub fn unavailable(cmd: &str) -> Option<&'static str> {
+    if ANDROID {
+        return match cmd {
+            "file.export_video" => Some(tr_noop!("Video export runs ffmpeg, which Android doesn't have: export an animated GIF, WebP or PNG sequence")),
+            "desktop.integrate" | "desktop.remove" | "desktop.status" => Some(tr_noop!("The applications menu belongs to an AppImage on Linux: it doesn't apply on Android")),
+            _ => None,
+        };
+    }
     if !WEB {
         return None;
     }
@@ -630,7 +640,8 @@ pub fn movie_host(embed_viewports: bool, own_window: bool) -> MovieHost {
 pub fn movie_host_for(os: Os, embed_viewports: bool, own_window: bool) -> MovieHost {
     if os == Os::Web {
         MovieHost::Inside(Inside::WebPage)
-    } else if embed_viewports {
+    } else if embed_viewports || ANDROID {
+        // One window: Android has no second window to open.
         MovieHost::Inside(Inside::NoWindows)
     } else if !own_window {
         MovieHost::Inside(Inside::Chosen)
@@ -648,6 +659,9 @@ pub fn window_positions() -> bool {
 
 /// winit picks Wayland when `WAYLAND_DISPLAY` is set, unless `WINIT_UNIX_BACKEND=x11`.
 pub fn window_positions_for(os: Os, wayland_display: bool, winit_backend: Option<&str>) -> bool {
+    if ANDROID {
+        return false;
+    }
     match os {
         Os::Linux | Os::Other => !wayland_display || winit_backend.is_some_and(|b| b.eq_ignore_ascii_case("x11")),
         Os::Web => false,
@@ -844,7 +858,7 @@ pub fn reads_file(cmd: &str) -> bool {
 
 /// Shows the platform's own dialog (Windows common dialog, macOS panel, Linux XDG portal), with
 /// `title` already in the interface language. `None` when cancelled.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn file_dialog(cmd: &str, title: &str, default_name: &str) -> Option<PathBuf> {
     let (label, exts) = filters(cmd);
     let (label, d) = (crate::i18n::t(label), rfd::FileDialog::new().set_title(title));
@@ -857,7 +871,7 @@ pub fn file_dialog(cmd: &str, title: &str, default_name: &str) -> Option<PathBuf
 
 /// The platform's save dialog for a file type that isn't a command's (an exporter plug-in's,
 /// ADR 0088): `label` names it in the filter, `ext` without the dot. `None` when cancelled.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn save_dialog(title: &str, label: &str, ext: &str, dir: Option<&std::path::Path>, default_name: &str) -> Option<PathBuf> {
     let mut d = rfd::FileDialog::new().set_title(title).add_filter(label, &[ext]).set_file_name(default_name);
     if let Some(dir) = dir.filter(|d| d.is_dir()) {
@@ -866,12 +880,23 @@ pub fn save_dialog(title: &str, label: &str, ext: &str, dir: Option<&std::path::
     d.save_file()
 }
 
+/// Android has no synchronous dialog: an exporter plug-in's file goes to the app's exports
+/// folder, where the Files app can reach it.
+#[cfg(target_os = "android")]
+pub fn save_dialog(_title: &str, _label: &str, _ext: &str, _dir: Option<&std::path::Path>, default_name: &str) -> Option<PathBuf> {
+    let dir = android::exports_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(default_name))
+}
+
 /// In a browser: asks for a file with the browser's file picker. It arrives later through
 /// [`picked_file`]; nothing arrives if the user cancels. The desktop has [`file_dialog`].
-#[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables, dead_code))]
+#[cfg_attr(not(any(target_arch = "wasm32", target_os = "android")), allow(unused_variables, dead_code))]
 pub fn pick_file(cmd: &'static str) {
     #[cfg(target_arch = "wasm32")]
     crate::web::pick_file(cmd, filters(cmd).1);
+    #[cfg(target_os = "android")]
+    android::dialog(cmd, "path", false, "");
 }
 
 /// A file the user picked in the browser: the command that asked for it, its name, and its
@@ -880,13 +905,19 @@ pub struct Picked {
     pub cmd: &'static str,
     pub name: String,
     pub data: Result<Vec<u8>, String>,
+    /// Android: the file is already on disk (the Kotlin half copied it into the app's folder, or
+    /// staged the place to save to); the command runs on this path with `key` as its parameter.
+    pub path: Option<PathBuf>,
+    pub key: &'static str,
 }
 
 /// The next file the browser handed over, if one arrived.
 pub fn picked_file() -> Option<Picked> {
     #[cfg(target_arch = "wasm32")]
     return crate::web::take_picked();
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(target_os = "android")]
+    return android::take();
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     None
 }
 
@@ -1106,5 +1137,85 @@ mod tests {
         assert_eq!(data_home_for(&with(Some("relative"))), Some(PathBuf::from("/home/a b/.local/share")), "a relative XDG_DATA_HOME is ignored");
         // This test process is not portable: no marker beside the test binary.
         assert_eq!(placement().portable, None);
+    }
+}
+
+// ----- Android: the system's pickers, through the Kotlin half ------------------------------------
+
+/// Open and Save on Android are the system's pickers (Storage Access Framework). They answer
+/// later, like the browser's, so a command waits for its file the way it does on the web: the
+/// answer is a path (Open: the document copied into the app's folder; Save: the place the user
+/// named, staged in the app's exports folder and mirrored to it after every save) and arrives
+/// through [`picked_file`]. The JNI side lives in `android_glue.rs`; this module holds the
+/// bookkeeping and is plain safe Rust.
+#[cfg(target_os = "android")]
+pub mod android {
+    use super::Picked;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::{Mutex, OnceLock, PoisonError};
+
+    /// What the glue provides: show a system picker (`save`: name suggestion, else a purpose),
+    /// and wake the UI thread when an answer arrives.
+    pub struct Hooks {
+        pub dialog: fn(id: i64, save: bool, arg: &str) -> bool,
+        pub wake: fn(),
+    }
+
+    struct Pending {
+        id: i64,
+        cmd: &'static str,
+        key: &'static str,
+    }
+
+    static HOOKS: OnceLock<Hooks> = OnceLock::new();
+    static NEXT: AtomicI64 = AtomicI64::new(1);
+    static PENDING: Mutex<Vec<Pending>> = Mutex::new(Vec::new());
+    static ARRIVED: Mutex<Vec<Picked>> = Mutex::new(Vec::new());
+
+    pub fn install(hooks: Hooks) {
+        let _ = HOOKS.set(hooks);
+    }
+
+    /// Asks Kotlin for a picker. `save`: `arg` is the file name to suggest; otherwise it says what
+    /// is being opened (`document` mirrors saves back to the picked file).
+    pub fn dialog(cmd: &'static str, key: &'static str, save: bool, arg: &str) {
+        let Some(h) = HOOKS.get() else { return };
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let purpose = if save || cmd != "file.open" { arg.to_string() } else { "document".to_string() };
+        PENDING.lock().unwrap_or_else(PoisonError::into_inner).push(Pending { id, cmd, key });
+        if !(h.dialog)(id, save, &purpose) {
+            PENDING.lock().unwrap_or_else(PoisonError::into_inner).retain(|p| p.id != id);
+        }
+    }
+
+    /// Kotlin's answer: a path, or `None` when the user cancelled.
+    pub fn answer(id: i64, path: Option<String>) {
+        let pending = {
+            let mut all = PENDING.lock().unwrap_or_else(PoisonError::into_inner);
+            all.iter().position(|p| p.id == id).map(|i| all.remove(i))
+        };
+        if let (Some(p), Some(path)) = (pending, path) {
+            let path = PathBuf::from(path);
+            let name = path.file_name().map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
+            ARRIVED.lock().unwrap_or_else(PoisonError::into_inner).push(Picked { cmd: p.cmd, name, data: Ok(Vec::new()), path: Some(path), key: p.key });
+        }
+        if let Some(h) = HOOKS.get() {
+            (h.wake)();
+        }
+    }
+
+    pub fn take() -> Option<Picked> {
+        let mut all = ARRIVED.lock().unwrap_or_else(PoisonError::into_inner);
+        if all.is_empty() { None } else { Some(all.remove(0)) }
+    }
+
+    /// Where exports that need a folder (a PNG sequence) go: `Android/data/<app>/files/exports`,
+    /// which the Files app can open. `ANICRAFT_EXPORTS_DIR` is set by the glue at start.
+    pub fn exports_dir() -> PathBuf {
+        match std::env::var_os("ANICRAFT_EXPORTS_DIR").filter(|v| !v.is_empty()) {
+            Some(d) => PathBuf::from(d),
+            None => std::env::temp_dir().join("exports"),
+        }
     }
 }
