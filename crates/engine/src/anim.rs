@@ -65,7 +65,7 @@ pub struct Rect {
 }
 
 /// One frame, compressed: the region it covers, whether it blends over what is there (else it
-/// replaces it), and its image data (PNG `IDAT` data, or a whole `VP8L` chunk).
+/// replaces it), and its image data (PNG `IDAT` data, or a raw `VP8L` payload).
 struct Encoded {
     rect: Rect,
     over: bool,
@@ -225,14 +225,14 @@ fn idat(png: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// A RIFF file's first chunk named `id`, whole (header, data and padding).
+/// A RIFF file's first chunk named `id`, payload only; craft-webp owns container framing.
 fn riff_chunk<'a>(riff: &'a [u8], id: &[u8; 4]) -> Option<&'a [u8]> {
     let mut at = 12usize;
     while let Some(head) = riff.get(at..at + 8) {
         let len = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
         let whole = 8 + len + (len & 1);
         if &head[0..4] == id {
-            return riff.get(at..at + whole).or_else(|| riff.get(at..at + 8 + len));
+            return riff.get(at + 8..at + 8 + len);
         }
         at += whole;
     }
@@ -242,26 +242,20 @@ fn riff_chunk<'a>(riff: &'a [u8], id: &[u8; 4]) -> Option<&'a [u8]> {
 /// Compresses `px` (`w` × `h` RGBA8) as one frame's data.
 fn compress(kind: Kind, px: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
     let fail = |e: String| EngineError::Format(format!("{} frame: {e}", kind.name()));
+    let img = craft_image_codecs::Image::from_u8(w, h, craft_image_codecs::ChannelLayout::Rgba, px.to_vec())
+        .map_err(|e| fail(e.to_string()))?;
     match kind {
         Kind::Apng => {
-            let mut buf = Vec::new();
-            {
-                let mut enc = png::Encoder::new(&mut buf, w, h);
-                enc.set_color(png::ColorType::Rgba);
-                enc.set_depth(png::BitDepth::Eight);
-                enc.set_adaptive_filter(png::AdaptiveFilterType::Adaptive);
-                enc.set_compression(png::Compression::Best);
-                let mut wr = enc.write_header().map_err(|e| fail(e.to_string()))?;
-                wr.write_image_data(px).map_err(|e| fail(e.to_string()))?;
-            }
+            let opts = craft_image_codecs::EncodeOptions {
+                png_compression: craft_image_codecs::PngCompression::Best,
+                ..Default::default()
+            };
+            let buf = craft_image_codecs::encode(&img, craft_image_codecs::Format::Png, &opts).map_err(|e| fail(e.to_string()))?;
             idat(&buf)
         }
         Kind::Webp => {
-            if px.len() != w as usize * h as usize * 4 {
-                return Err(fail("the frame has the wrong size".into()));
-            }
-            let mut buf = Vec::new();
-            image_webp::WebPEncoder::new(&mut buf).encode(px, w, h, image_webp::ColorType::Rgba8).map_err(|e| fail(e.to_string()))?;
+            let opts = craft_image_codecs::EncodeOptions { webp_lossless: true, ..Default::default() };
+            let buf = craft_image_codecs::encode(&img, craft_image_codecs::Format::WebP, &opts).map_err(|e| fail(e.to_string()))?;
             riff_chunk(&buf, b"VP8L").map(<[u8]>::to_vec).ok_or_else(|| fail("the WebP encoder wrote no lossless image".into()))
         }
     }
@@ -328,47 +322,26 @@ fn apng_file(w: u32, h: u32, plays: u32, frames: &[(&Encoded, (u16, u16))]) -> R
     Ok(out)
 }
 
-fn le24(v: &mut Vec<u8>, x: u32) {
-    v.extend_from_slice(&x.to_le_bytes()[..3]);
-}
-
-fn riff_push(out: &mut Vec<u8>, id: &[u8; 4], data: &[u8]) -> Result<()> {
-    let len = u32::try_from(data.len()).map_err(|_| EngineError::Format("an animated WebP frame is too large".into()))?;
-    out.extend_from_slice(id);
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(data);
-    if len & 1 == 1 {
-        out.push(0);
-    }
-    Ok(())
-}
-
-/// The animated WebP file: frames with their durations. `background` is the stage colour as
-/// the `ANIM` background (RGBA), or transparent.
+/// The animated WebP container is shared; frame selection, delta rectangles and timing
+/// remain application policy. `Encoded::data` is a raw VP8L payload, not a RIFF chunk.
 fn webp_file(w: u32, h: u32, plays: u32, alpha: bool, background: [u8; 4], frames: &[(&Encoded, u32)]) -> Result<Vec<u8>> {
-    let mut body = b"WEBP".to_vec();
-    let mut vp8x = vec![if alpha { 0x10 | 0x02 } else { 0x02 }, 0, 0, 0];
-    le24(&mut vp8x, w - 1);
-    le24(&mut vp8x, h - 1);
-    riff_push(&mut body, b"VP8X", &vp8x)?;
+    use craft_webp::anim::{AnimFrame, AnimOptions, Payload};
+    let frames: Vec<_> = frames
+        .iter()
+        .map(|(f, ms)| AnimFrame {
+            x: f.rect.x,
+            y: f.rect.y,
+            width: f.rect.w,
+            height: f.rect.h,
+            duration_ms: *ms,
+            blend: f.over,
+            dispose_to_background: false,
+            payload: Payload::Lossless { vp8l: &f.data },
+        })
+        .collect();
     let [r, g, b, a] = background;
-    let mut anim = vec![b, g, r, a];
-    anim.extend_from_slice(&u16::try_from(plays).unwrap_or(u16::MAX).to_le_bytes());
-    riff_push(&mut body, b"ANIM", &anim)?;
-    for (f, ms) in frames {
-        let mut anmf = Vec::with_capacity(16 + f.data.len());
-        le24(&mut anmf, f.rect.x / 2);
-        le24(&mut anmf, f.rect.y / 2);
-        le24(&mut anmf, f.rect.w - 1);
-        le24(&mut anmf, f.rect.h - 1);
-        le24(&mut anmf, *ms);
-        anmf.push(if f.over { 0 } else { 0x02 }); // blending: alpha-blend or replace; dispose: none
-        anmf.extend_from_slice(&f.data);
-        riff_push(&mut body, b"ANMF", &anmf)?;
-    }
-    let mut out = Vec::with_capacity(body.len() + 8);
-    riff_push(&mut out, b"RIFF", &body)?;
-    Ok(out)
+    let opts = AnimOptions { loop_count: u16::try_from(plays).unwrap_or(u16::MAX), background_bgra: [b, g, r, a], alpha, ..Default::default() };
+    craft_webp::anim::animation(w, h, &frames, &opts).map_err(|e| EngineError::Format(e.to_string()))
 }
 
 // ----- the command -------------------------------------------------------------------------

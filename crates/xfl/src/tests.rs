@@ -1,8 +1,16 @@
 //! Import tests on a small, self-authored XFL package.
 
 use crate::import::{XflError, import_with};
-use anicraft_doc::{ElementKind, LayerKind, LoopMode, Paint, Rgba, SymbolKind, evaluate};
+use anicraft_doc::{ColorEffect, ColorTransform, ElementKind, LayerKind, LoopMode, Paint, Rgba, SymbolKind, evaluate};
 use std::collections::HashMap;
+
+#[test]
+fn shared_zip_errors_keep_anicraft_import_wording() {
+    let entry = XflError::from(crate::zip::ZipError::Unsupported("a.xml".into(), "encryption"));
+    assert_eq!(entry.to_string(), "'a.xml' uses a zip feature AniCraft can't read (encryption)");
+    let archive = XflError::from(crate::zip::ZipError::UnsupportedArchive("split across several files"));
+    assert_eq!(archive.to_string(), "the archive uses a zip feature AniCraft can't read (split across several files)");
+}
 
 const DOC: &str = r##"<DOMDocument xmlns="http://ns.adobe.com/xfl/2008/" width="640" height="360" frameRate="30" backgroundColor="#336699">
   <symbols><Include href="Characters/Ball.xml"/><Include href="Missing.xml"/></symbols>
@@ -116,6 +124,27 @@ fn stage_layers_frames_and_tweens() {
 }
 
 #[test]
+fn prefixed_xfl_names_survive_shared_parse_and_domain_mapping() {
+    let doc = r##"<a:DOMDocument xmlns:a="http://ns.adobe.com/xfl/2008/" width="120" height="80">
+      <a:timelines><a:DOMTimeline name="Prefixed Scene"><a:layers>
+        <a:DOMLayer name="Prefixed Layer"><a:frames><a:DOMFrame index="0" duration="3" name="key">
+          <a:elements><a:DOMRectangleObject x="2" y="3" objectWidth="10" objectHeight="8"><a:fill><a:SolidColor color="#336699"/></a:fill></a:DOMRectangleObject></a:elements>
+        </a:DOMFrame></a:frames></a:DOMLayer>
+      </a:layers></a:DOMTimeline></a:timelines>
+    </a:DOMDocument>"##;
+    let (document, _) = import(&HashMap::from([("DOMDocument.xml", doc)])).unwrap();
+    assert_eq!(document.scenes[0].name, "Prefixed Scene");
+    let layer = &document.timeline(0).layers[0];
+    assert_eq!(layer.name, "Prefixed Layer");
+    assert_eq!(layer.keyframes.len(), 1);
+    assert_eq!(
+        (layer.keyframes[0].start, layer.keyframes[0].duration, layer.keyframes[0].label.as_str()),
+        (0, 3, "key")
+    );
+    assert_eq!(layer.keyframes[0].elements.len(), 1, "prefixed geometry reaches the app model");
+}
+
+#[test]
 fn mask_layers_mask_the_layers_that_point_at_them() {
     // A mask inside a folder: `parentLayerIndex` counts every layer in the file, folders too.
     let shape = r##"<DOMShape><fills><FillStyle index="1"><SolidColor color="#FF0000"/></FillStyle></fills>
@@ -151,8 +180,12 @@ fn symbols_instances_and_the_tween_between_them() {
     let sym = &doc.library[0];
     assert_eq!((sym.name.as_str(), sym.kind), ("Ball", SymbolKind::MovieClip));
     let inst = &doc.timeline(0).layers[0].keyframes[0].elements[0];
-    let ElementKind::Symbol { symbol, loop_mode, first_frame, blend, filters, .. } = &inst.kind else { panic!("an instance") };
+    let ElementKind::Symbol { symbol, loop_mode, first_frame, blend, filters: entries, .. } = &inst.kind else { panic!("an instance") };
     assert_eq!(*blend, anicraft_doc::BlendMode::HardLight, "Animate's blend mode names");
+    // In order; the switched-off glow comes in switched off, keeping its place (ADR 0091).
+    assert_eq!(entries.iter().map(|e| e.enabled).collect::<Vec<_>>(), [true, true, false, true, true, true]);
+    assert!(matches!(entries[2].filter, anicraft_doc::Filter::Glow { .. }));
+    let filters: Vec<anicraft_doc::Filter> = entries.iter().filter(|e| e.enabled).map(|e| e.filter.clone()).collect();
     assert_eq!(filters.len(), 5, "{filters:?}");
     assert!(matches!(filters[0], anicraft_doc::Filter::DropShadow { distance, inner: false, .. } if distance == 8.0));
     assert!(matches!(filters[1], anicraft_doc::Filter::Blur { blur_x, quality: 2, .. } if blur_x == 10.0));
@@ -176,6 +209,50 @@ fn symbols_instances_and_the_tween_between_them() {
     let ball = dl.items.iter().find(|i| matches!(i.fill, Some(Paint::Solid(c)) if c == Rgba::hex(0xff0000))).expect("the ball renders");
     let x = ball.transform.translation().x;
     assert!(x > 100.0 && x < 300.0, "{x}");
+}
+
+#[test]
+fn shared_native_color_effect_view_preserves_anicraft_style_mapping() {
+    let document = r##"<DOMDocument>
+      <symbols><Include href="Target.xml"/></symbols>
+      <timelines><DOMTimeline name="Scene 1"><layers><DOMLayer name="Layer 1"><frames><DOMFrame index="0"><elements>
+        <DOMSymbolInstance libraryItemName="Target" name="Tint"><color><Color tintMultiplier=".25" tintColor="#336699" brightness=".8" alphaMultiplier=".5"/></color></DOMSymbolInstance>
+        <DOMSymbolInstance libraryItemName="Target" name="Bright"><color><Color brightness="-.25" alphaMultiplier=".75"/></color></DOMSymbolInstance>
+        <DOMSymbolInstance libraryItemName="Target" name="Advanced"><color><Color redMultiplier="2" greenMultiplier="bad" blueMultiplier="-.5" alphaMultiplier=".5" redOffset="255" greenOffset="-127.5" alphaOffset="128"/></color></DOMSymbolInstance>
+      </elements></DOMFrame></frames></DOMLayer></layers></DOMTimeline></timelines>
+    </DOMDocument>"##;
+    let symbol = r#"<DOMSymbolItem name="Target"><timeline><DOMTimeline name="Target"/></timeline></DOMSymbolItem>"#;
+    let files = HashMap::from([("DOMDocument.xml", document), ("LIBRARY/Target.xml", symbol)]);
+    let (doc, _) = import(&files).unwrap();
+    let elements = &doc.timeline(0).layers[0].keyframes[0].elements;
+
+    let mut tint = ColorTransform::tint(Rgba::hex(0x336699), 0.25);
+    tint.mul[3] = 0.5;
+    assert_eq!(elements[0].name, "Tint");
+    assert_eq!(elements[0].color, ColorEffect::Advanced(tint).sanitized(), "tint keeps precedence over brightness and composes alpha");
+
+    let bright = ColorEffect::Brightness(-0.25).with_alpha(0.75);
+    assert_eq!(elements[1].name, "Bright");
+    assert_eq!(elements[1].color, bright.sanitized());
+
+    let advanced = ColorTransform { mul: [2.0, 1.0, -0.5, 0.5], add: [1.0, -0.5, 0.0, 128.0 / 255.0] };
+    assert_eq!(elements[2].name, "Advanced");
+    assert_eq!(
+        elements[2].color,
+        ColorEffect::Advanced(advanced).sanitized(),
+        "invalid multipliers default to identity and offsets stay in XFL byte units until mapping"
+    );
+}
+
+#[test]
+fn bevel_filter_keeps_white_highlight_when_only_alpha_is_stored() {
+    let mut files = package();
+    let document = Box::leak(DOC.replace("<filters>", "<filters><BevelFilter highlightAlpha=\"0.4\"/>").into_boxed_str());
+    files.insert("DOMDocument.xml", document);
+    let (doc, _) = import(&files).unwrap();
+    let ElementKind::Symbol { filters, .. } = &doc.timeline(0).layers[0].keyframes[0].elements[0].kind else { panic!("a symbol instance") };
+    let anicraft_doc::Filter::Bevel { highlight_color, .. } = filters[0].filter else { panic!("a bevel filter") };
+    assert_eq!(highlight_color, Rgba::WHITE.with_alpha(0.4));
 }
 
 #[test]
@@ -248,15 +325,8 @@ fn shape_tweens_come_across_as_shape_tweens() {
 }
 
 fn png_2x1() -> Vec<u8> {
-    let mut out = Vec::new();
-    {
-        let mut enc = png::Encoder::new(&mut out, 2, 1);
-        enc.set_color(png::ColorType::Rgba);
-        enc.set_depth(png::BitDepth::Eight);
-        let mut wr = enc.write_header().unwrap();
-        wr.write_image_data(&[255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
-    }
-    out
+    let img = craft_image_codecs::Image::from_u8(2, 1, craft_image_codecs::ChannelLayout::Rgba, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+    craft_image_codecs::encode(&img, craft_image_codecs::Format::Png, &craft_image_codecs::EncodeOptions::default()).unwrap()
 }
 
 const BITMAP_DOC: &str = r##"<DOMDocument width="200" height="100">
@@ -466,6 +536,38 @@ trace(n);]]></script></Actionscript><elements><DOMSymbolInstance libraryItemName
 }
 
 #[test]
+fn shared_symbol_metadata_views_keep_prefixed_library_mapping_and_defaults() {
+    let document = r#"<x:DOMDocument xmlns:x="http://ns.adobe.com/xfl/2008/">
+      <x:symbols>
+        <x:Extension href="Missing.xml"/>
+        <x:Include href="Ui/Panel.xml"/>
+        <x:Include href="Ui/Panel.xml"/>
+      </x:symbols>
+      <x:folders><x:Extension name="Ignored"/><x:DOMFolderItem name="Empty"/></x:folders>
+      <x:timelines><x:DOMTimeline name="Scene 1"><x:layers/></x:DOMTimeline></x:timelines>
+    </x:DOMDocument>"#;
+    let symbol = r#"<x:DOMSymbolItem xmlns:x="http://ns.adobe.com/xfl/2008/" name="Ui/Panel" symbolType="button"
+        linkageExportForAS="true" linkageClassName=" " linkageIdentifier="ui.Panel"
+        linkageBaseClass="flash.display.MovieClip"
+        scaleGridLeft="90" scaleGridRight="10" scaleGridTop="30" scaleGridBottom="10">
+      <x:timeline><x:DOMTimeline name="Panel"><x:layers/></x:DOMTimeline></x:timeline>
+    </x:DOMSymbolItem>"#;
+    let files = HashMap::from([("DOMDocument.xml", document), ("LIBRARY/Ui/Panel.xml", symbol)]);
+    let (doc, report) = import(&files).unwrap();
+
+    assert_eq!(doc.library.len(), 1, "repeated Include paths still register one library symbol");
+    let panel = &doc.library[0];
+    assert_eq!(panel.name, "Panel");
+    assert_eq!(panel.kind, SymbolKind::Button);
+    assert_eq!(panel.linkage.as_ref().map(|linkage| (linkage.class.as_str(), linkage.base.as_str())), Some(("ui.Panel", "flash.display.MovieClip")));
+    let grid = panel.scale_grid.expect("all four finite guide attributes form a grid");
+    assert_eq!((grid.left, grid.right, grid.top, grid.bottom), (10.0, 90.0, 10.0, 30.0));
+    let folder_paths: Vec<String> = doc.library_tree.folders.iter().map(|folder| doc.entry_path(anicraft_doc::LibraryEntry::Folder(folder.id))).collect();
+    assert_eq!(folder_paths, ["Empty", "Ui"]);
+    assert!(!report.skipped.contains_key("missing library files"), "non-Include extension nodes are ignored");
+}
+
+#[test]
 fn loose_shapes_come_in_raw_and_drawing_objects_and_groups_as_groups() {
     // Animate's raw shapes (merge drawing) are loose `DOMShape`s; a drawing object says so, and
     // a group is a group (ADR 0073) whose shapes merge only with each other.
@@ -574,10 +676,12 @@ fn sounds_in_the_package_come_across_on_frames_and_buttons_states() {
     assert_eq!(on(1).map(|s| (s.sound, s.sync)), Some((click, anicraft_doc::SoundSync::Event)));
     assert_eq!(on(2).map(|s| (s.sound, s.sync)), Some((click, anicraft_doc::SoundSync::Stream)));
     assert_eq!(on(3), None);
-    assert_eq!(report.skipped.get("sounds stored in Animate's own format"), Some(&1));
-    assert_eq!(report.skipped.get("missing sound files"), Some(&1));
+    assert_eq!(on(2).map(|s| s.effect), Some(anicraft_doc::sound::SoundEffect::FadeIn), "the effect comes across (ADR 0086)");
+    // Sounds that don't come across are named, with their format (ADR 0086).
+    assert_eq!(report.names.get("sounds in formats AniCraft can't decode"), Some(&vec!["private.mp3: Animate's own sound data".to_string()]));
+    assert_eq!(report.names.get("missing sound files"), Some(&vec!["gone.wav".to_string()]));
     assert_eq!(report.skipped.get("frame sounds whose sound isn't in the package"), Some(&1));
-    assert_eq!(report.skipped.get("sound effects and envelopes (played without)"), Some(&1));
+    assert!(report.summary().contains("1 missing sound files (gone.wav)"), "{}", report.summary());
     // In the player, going over the button starts its Over sound.
     use anicraft_doc::player::{Event, NoScripts, input, start};
     let s = start(&doc, &mut NoScripts);
@@ -595,4 +699,75 @@ fn a_document_without_a_background_colour_has_a_white_stage() {
     let (doc, _) = import_with(&read).unwrap();
     assert_eq!(doc.stage.background, Rgba::WHITE);
     assert_eq!((doc.stage.width, doc.stage.height), (550, 400), "Animate's default size, also left out");
+}
+
+/// ADR 0086: hostile sound data (cut short, sizes that lie, a sample count far past the file)
+/// never panics, never allocates past the file, and is either read for what it holds or named
+/// in the report.
+#[test]
+fn hostile_sound_files_are_bounded_and_named() {
+    let doc = r#"<DOMDocument><media><DOMSoundItem name="s.wav" href="s.wav" sampleCount="99999999999999" format="44kHz 16bit Stereo"/></media>
+      <timelines><DOMTimeline name="Scene 1"><layers><DOMLayer name="L"><frames><DOMFrame index="0" soundName="s.wav" soundLoop="4294967295"/></frames></DOMLayer></layers></DOMTimeline></timelines></DOMDocument>"#;
+    let open = |wav: Vec<u8>| {
+        let files: HashMap<String, Vec<u8>> = HashMap::from([("DOMDocument.xml".to_string(), doc.as_bytes().to_vec()), ("LIBRARY/s.wav".to_string(), wav)]);
+        let read = |p: &str| -> Result<Option<Vec<u8>>, XflError> { Ok(files.get(p).cloned()) };
+        import_with(&read).unwrap()
+    };
+    let good = anicraft_doc::audio::wav::encode(8000, 2, &[0.5; 1600], anicraft_doc::audio::wav::Bits::Int16);
+    let (d, _) = open(good.clone());
+    assert_eq!(d.sounds[0].frames, 800);
+    assert_eq!(d.timeline(0).layers[0].keyframes[0].sound.as_ref().unwrap().repeat, anicraft_doc::sound::MAX_REPEAT, "repeats bounded");
+    // Every cut: read for what it holds, or named.
+    for cut in 0..good.len() {
+        let (d, r) = open(good[..cut].to_vec());
+        assert!(d.sounds.len() == 1 || r.names.values().flatten().any(|n| n.starts_with("s.wav")), "cut at {cut}: {r:?}");
+        assert!(d.sounds.iter().all(|s| s.frames <= 800));
+    }
+    // The data chunk claiming 4 GB, and the RIFF size lying: only what is there is read.
+    let mut lying = good.clone();
+    lying[40..44].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+    lying[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    let (d, _) = open(lying);
+    assert_eq!(d.sounds[0].frames, 800);
+    // 32 channels of one byte each claimed in a tiny file: no frames, so named, not imported.
+    let mut wide = good;
+    wide[22..24].copy_from_slice(&32u16.to_le_bytes());
+    wide[32..34].copy_from_slice(&64u16.to_le_bytes());
+    wide.truncate(44 + 10);
+    let (d, r) = open(wide);
+    assert!(d.sounds.is_empty() && r.skipped.get("sounds in formats AniCraft can't decode") == Some(&1), "{r:?}");
+}
+
+/// ADR 0086: the report names what didn't come across, a few per kind in the summary line.
+#[test]
+fn the_summary_names_a_few_items_and_counts_the_rest() {
+    let mut media = String::new();
+    for i in 0..5 {
+        media.push_str(&format!(r#"<DOMSoundItem name="gone{i}.wav" href="gone{i}.wav"/>"#));
+    }
+    let doc = format!(r#"<DOMDocument><media>{media}</media><timelines><DOMTimeline name="Scene 1"/></timelines></DOMDocument>"#);
+    let read = |p: &str| -> Result<Option<Vec<u8>>, XflError> { Ok((p == "DOMDocument.xml").then(|| doc.as_bytes().to_vec())) };
+    let (_, r) = import_with(&read).unwrap();
+    assert_eq!(r.names["missing sound files"].len(), 5);
+    assert!(r.summary().contains("5 missing sound files (gone0.wav; gone1.wav; gone2.wav and 2 more)"), "{}", r.summary());
+}
+
+/// ADR 0086: a `.fla` whose package sits in one top folder opens; one with the package at its
+/// root and a folder beside it opens the root one; several documents in top folders are
+/// refused with their names.
+#[test]
+fn a_package_in_one_top_folder_opens_and_several_are_named() {
+    use crate::zip::pack::{Raw, write};
+    let doc = br#"<DOMDocument width="99"><timelines><DOMTimeline name="Scene 1"/></timelines></DOMDocument>"#;
+    let other = br#"<DOMDocument width="42"><timelines><DOMTimeline name="Scene 1"/></timelines></DOMDocument>"#;
+    let fla = |entries: &[(&str, &[u8])]| write(&entries.iter().map(|(n, b)| Raw::new(n, b, true)).collect::<Vec<_>>(), false);
+    let (d, _) = crate::import_fla(&fla(&[("Walk/DOMDocument.xml", doc), ("__MACOSX/Walk/._DOMDocument.xml", b"\0\x05\x16\x07")])).unwrap();
+    assert_eq!(d.stage.width, 99);
+    let (d, _) = crate::import_fla(&fla(&[("DOMDocument.xml", doc), ("Old/DOMDocument.xml", other)])).unwrap();
+    assert_eq!(d.stage.width, 99, "the package at the root wins");
+    let e = crate::import_fla(&fla(&[("Walk/DOMDocument.xml", doc), ("Run/DOMDocument.xml", other)])).err().unwrap().to_string();
+    assert!(e.contains("2 Animate documents (Run, Walk)"), "{e}");
+    // Deeper than one folder isn't looked for.
+    let e = crate::import_fla(&fla(&[("a/b/DOMDocument.xml", doc)])).err().unwrap().to_string();
+    assert!(e.contains("no DOMDocument.xml"), "{e}");
 }

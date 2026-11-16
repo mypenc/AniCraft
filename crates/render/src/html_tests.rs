@@ -537,7 +537,7 @@ fn what_does_not_carry_across_is_reported() {
     let l = Arc::make_mut(&mut tl.layers[2]);
     let k = l.keyframe_mut(0).unwrap();
     if let ElementKind::Symbol { filters, blend, .. } = &mut Arc::make_mut(&mut k.elements[0]).kind {
-        filters.push(anicraft_doc::Filter::Blur { blur_x: 4.0, blur_y: 4.0, quality: 1 });
+        filters.push(anicraft_doc::Filter::Blur { blur_x: 4.0, blur_y: 4.0, quality: 1 }.into());
         *blend = BlendMode::Subtract;
     }
     Arc::make_mut(&mut tl.layers[0]).keyframe_mut(1).unwrap().script = Some(FrameScript::Plugin(PluginScript { id: "org.example.menu".into(), entry: "main".into() }));
@@ -567,14 +567,7 @@ fn what_does_not_carry_across_is_reported() {
 #[test]
 fn bitmaps_and_sounds_are_embedded_once() {
     let mut doc = Document::default();
-    let png = {
-        let mut out = Vec::new();
-        let mut enc = png::Encoder::new(&mut out, 1, 1);
-        enc.set_color(png::ColorType::Rgba);
-        enc.set_depth(png::BitDepth::Eight);
-        enc.write_header().unwrap().write_image_data(&[255, 0, 0, 255]).unwrap();
-        out
-    };
+    let png = crate::encode_png(1, 1, &[255, 0, 0, 255]).unwrap();
     let bitmap = anicraft_doc::Bitmap::from_png(anicraft_doc::BitmapId(50), "dot", png).unwrap();
     doc.bitmaps.push(Arc::new(bitmap));
     let wav = anicraft_doc::audio::wav::encode(8000, 1, &[0.0; 80], anicraft_doc::audio::wav::Bits::Int16);
@@ -1102,7 +1095,7 @@ fn filtered_doc(filters: &[anicraft_doc::Filter]) -> Document {
     d.library.push(symbol(300, SymbolKind::MovieClip, vec![layer(301, vec![kf(0, 1, vec![el(302, a), el(303, b)], vec![], "")])]));
     let mut i = (*inst(310, 300, "art", Affine::translate(18.4, 15.2), vec![])).clone();
     if let ElementKind::Symbol { filters: f, .. } = &mut i.kind {
-        *f = filters.to_vec();
+        *f = filters.iter().cloned().map(Into::into).collect();
     }
     Arc::make_mut(&mut d.timeline_mut(0).layers[0]).keyframe_mut(0).unwrap().elements = vec![Arc::new(i)];
     d

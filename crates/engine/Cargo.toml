@@ -15,15 +15,15 @@ anicraft-xfl.workspace = true
 anicraft-svg.workspace = true
 anicraft-text.workspace = true
 anicraft-plugins.workspace = true
+craft-anicraft-format.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
 web-time.workspace = true
-gif.workspace = true
-# Animated PNG frames (ADR 0063; already in the tree through the renderer).
-png.workspace = true
-image-webp.workspace = true
+craft-gif.workspace = true
+craft-image-codecs.workspace = true
+craft-webp.workspace = true
 regex.workspace = true
 
 [dev-dependencies]
