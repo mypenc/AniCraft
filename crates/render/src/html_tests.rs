@@ -1442,3 +1442,32 @@ fn custom_and_per_property_eases_play_in_the_page_as_they_evaluate() {
     d.sanitize();
     compare(&d, &vec![(vec![], vec![]); 30]);
 }
+
+// Frozen pre-cutover escaping oracle; original application behavior.
+fn previous_html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+#[test]
+fn shared_html_escape_preserves_all_unicode_scalars() {
+    for ch in (0..=0x10ffff).filter_map(char::from_u32) {
+        let mut buf = [0u8; 4];
+        let text = ch.encode_utf8(&mut buf);
+        assert_eq!(super::escape_html(text), previous_html_escape(text), "{ch:?}");
+    }
+    for text in ["<script>&\"'", "a\n\t\r\0z", "é 😀 &amp;", ""] {
+        assert_eq!(super::escape_html(text), previous_html_escape(text));
+    }
+}

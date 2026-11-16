@@ -192,18 +192,7 @@ pub fn title(markdown: &str) -> String {
 }
 
 fn escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            c => out.push(c),
-        }
-    }
-    out
+    craft_html::escape(s)
 }
 
 /// `../` once per folder the page is in, to reach the book's root.

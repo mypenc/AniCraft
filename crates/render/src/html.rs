@@ -982,19 +982,13 @@ pub fn movie(doc: &Document, opts: &HtmlOptions) -> Movie {
 
 /// Text for HTML content and attributes.
 fn escape_html(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            c if c.is_control() => {}
-            c => out.push(c),
-        }
+    // Exported page labels discard controls; this policy is distinct from guide text.
+    if s.chars().any(char::is_control) {
+        let clean: String = s.chars().filter(|c| !c.is_control()).collect();
+        craft_html::escape(&clean)
+    } else {
+        craft_html::escape(s)
     }
-    out
 }
 
 /// The movie as one web page: the data, the player and the page code inline, images and

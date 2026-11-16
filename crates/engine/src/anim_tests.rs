@@ -431,3 +431,67 @@ fn shared_webp_container_preserves_payload_timing_loop_and_alpha() {
     assert!(webp_file(1, 1, 0, false, [0; 4], &[]).is_err());
     assert!(webp_file(1, 1, 0, false, [0; 4], &[(&f, 1 << 24)]).is_err());
 }
+
+// Frozen pre-cutover assembly oracle (original APNG implementation by Tanish Manku).
+fn png_chunk(out: &mut Vec<u8>, id: &[u8; 4], data: &[u8]) -> Result<()> {
+    let len =
+        u32::try_from(data.len()).ok().filter(|l| *l < 1 << 31).ok_or_else(|| EngineError::Format("an animated PNG frame is too large".into()))?;
+    out.extend_from_slice(&len.to_be_bytes());
+    let from = out.len();
+    out.extend_from_slice(id);
+    out.extend_from_slice(data);
+    let crc = anicraft_xfl::zip::crc32(out.get(from..).unwrap_or(&[]));
+    out.extend_from_slice(&crc.to_be_bytes());
+    Ok(())
+}
+
+/// The APNG file: frames with their delays (the first frame is the default image).
+fn legacy_apng_file(w: u32, h: u32, plays: u32, frames: &[(&Encoded, (u16, u16))]) -> Result<Vec<u8>> {
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&w.to_be_bytes());
+    ihdr.extend_from_slice(&h.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA, deflate, adaptive filters, no interlace
+    png_chunk(&mut out, b"IHDR", &ihdr)?;
+    let count = u32::try_from(frames.len()).map_err(|_| EngineError::Format("too many frames".into()))?;
+    let mut actl = count.to_be_bytes().to_vec();
+    actl.extend_from_slice(&plays.to_be_bytes());
+    png_chunk(&mut out, b"acTL", &actl)?;
+    let mut seq = 0u32;
+    for (k, (f, (num, den))) in frames.iter().enumerate() {
+        let mut fctl = Vec::with_capacity(26);
+        for v in [seq, f.rect.w, f.rect.h, f.rect.x, f.rect.y] {
+            fctl.extend_from_slice(&v.to_be_bytes());
+        }
+        fctl.extend_from_slice(&num.to_be_bytes());
+        fctl.extend_from_slice(&den.to_be_bytes());
+        fctl.extend_from_slice(&[0, u8::from(f.over)]); // dispose: none; blend: source or over
+        png_chunk(&mut out, b"fcTL", &fctl)?;
+        seq += 1;
+        if k == 0 {
+            png_chunk(&mut out, b"IDAT", &f.data)?;
+        } else {
+            let mut fdat = Vec::with_capacity(f.data.len() + 4);
+            fdat.extend_from_slice(&seq.to_be_bytes());
+            fdat.extend_from_slice(&f.data);
+            png_chunk(&mut out, b"fdAT", &fdat)?;
+            seq += 1;
+        }
+    }
+    png_chunk(&mut out, b"IEND", &[])?;
+    Ok(out)
+}
+
+#[test]
+fn shared_apng_container_preserves_exact_wire_bytes() {
+    let first = Encoded { rect: Rect { x: 0, y: 0, w: 3, h: 2 }, over: false, data: vec![1, 2, 3] };
+    let second = Encoded { rect: Rect { x: 2, y: 1, w: 1, h: 1 }, over: true, data: vec![4, 5] };
+    for plays in [0, 1, 7] {
+        for delay in [(0, 0), (200, 2997), (u16::MAX, u16::MAX)] {
+            let frames = [(&first, delay), (&second, (1, 100)), (&second, (0, 1))];
+            assert_eq!(apng_file(3, 2, plays, &frames).unwrap(), legacy_apng_file(3, 2, plays, &frames).unwrap());
+        }
+    }
+    assert!(apng_file(3, 2, 0, &[]).is_err());
+    assert!(apng_file(3, 2, 0, &[(&second, (1, 1))]).is_err());
+}

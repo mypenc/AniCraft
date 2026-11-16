@@ -274,52 +274,31 @@ fn still(kind: Kind) -> Result<Encoded> {
 
 // ----- the files ---------------------------------------------------------------------------
 
-fn png_chunk(out: &mut Vec<u8>, id: &[u8; 4], data: &[u8]) -> Result<()> {
-    let len = u32::try_from(data.len()).ok().filter(|l| *l < 1 << 31).ok_or_else(|| EngineError::Format("an animated PNG frame is too large".into()))?;
-    out.extend_from_slice(&len.to_be_bytes());
-    let from = out.len();
-    out.extend_from_slice(id);
-    out.extend_from_slice(data);
-    let crc = anicraft_xfl::zip::crc32(out.get(from..).unwrap_or(&[]));
-    out.extend_from_slice(&crc.to_be_bytes());
-    Ok(())
-}
-
-/// The APNG file: frames with their delays (the first frame is the default image).
+/// The shared container owns PNG chunks, CRCs and APNG sequence validation.
+/// Frame selection, compression and exact rational timing remain AniCraft policy.
 fn apng_file(w: u32, h: u32, plays: u32, frames: &[(&Encoded, (u16, u16))]) -> Result<Vec<u8>> {
-    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
-    let mut ihdr = Vec::with_capacity(13);
-    ihdr.extend_from_slice(&w.to_be_bytes());
-    ihdr.extend_from_slice(&h.to_be_bytes());
-    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA, deflate, adaptive filters, no interlace
-    png_chunk(&mut out, b"IHDR", &ihdr)?;
-    let count = u32::try_from(frames.len()).map_err(|_| EngineError::Format("too many frames".into()))?;
-    let mut actl = count.to_be_bytes().to_vec();
-    actl.extend_from_slice(&plays.to_be_bytes());
-    png_chunk(&mut out, b"acTL", &actl)?;
-    let mut seq = 0u32;
-    for (k, (f, (num, den))) in frames.iter().enumerate() {
-        let mut fctl = Vec::with_capacity(26);
-        for v in [seq, f.rect.w, f.rect.h, f.rect.x, f.rect.y] {
-            fctl.extend_from_slice(&v.to_be_bytes());
-        }
-        fctl.extend_from_slice(&num.to_be_bytes());
-        fctl.extend_from_slice(&den.to_be_bytes());
-        fctl.extend_from_slice(&[0, u8::from(f.over)]); // dispose: none; blend: source or over
-        png_chunk(&mut out, b"fcTL", &fctl)?;
-        seq += 1;
-        if k == 0 {
-            png_chunk(&mut out, b"IDAT", &f.data)?;
-        } else {
-            let mut fdat = Vec::with_capacity(f.data.len() + 4);
-            fdat.extend_from_slice(&seq.to_be_bytes());
-            fdat.extend_from_slice(&f.data);
-            png_chunk(&mut out, b"fdAT", &fdat)?;
-            seq += 1;
-        }
-    }
-    png_chunk(&mut out, b"IEND", &[])?;
-    Ok(out)
+    use craft_apng_container::apng::Frame;
+    // Bound the output by the already-compressed payloads plus exact framing.
+    // Pixel/frame budgets are enforced before rendering, unchanged by this adapter.
+    let budget = frames
+        .iter()
+        .enumerate()
+        .try_fold(65usize, |size, (index, (f, _))| size.checked_add(50 + if index == 0 { 0 } else { 4 }).and_then(|n| n.checked_add(f.data.len())))
+        .ok_or_else(|| EngineError::Format("animated PNG output size overflow".into()))?;
+    let frames: Vec<_> = frames
+        .iter()
+        .map(|(f, (num, den))| Frame {
+            width: f.rect.w,
+            height: f.rect.h,
+            x: f.rect.x,
+            y: f.rect.y,
+            delay_num: *num,
+            delay_den: *den,
+            over: f.over,
+            data: &f.data,
+        })
+        .collect();
+    craft_apng_container::apng::encode(w, h, plays, &frames, budget).map_err(|e| EngineError::Format(e.to_string()))
 }
 
 /// The animated WebP container is shared; frame selection, delta rectangles and timing
