@@ -405,10 +405,17 @@ struct Shared {
     notify: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
-/// Default image-cache budget.
+/// Default image-cache budget. The browser build gets far less: wasm memory only grows and is
+/// never handed back, so a native-sized cache made a few strokes plus undos reach ~900 MB.
+#[cfg(not(target_arch = "wasm32"))]
 pub const DEFAULT_CACHE_BYTES: usize = 768 * 1024 * 1024;
+#[cfg(target_arch = "wasm32")]
+pub const DEFAULT_CACHE_BYTES: usize = 96 * 1024 * 1024;
 /// Default budget for pictures a rasterizer keeps on the GPU (graphics memory is scarcer).
+#[cfg(not(target_arch = "wasm32"))]
 pub const DEFAULT_NATIVE_CACHE_BYTES: usize = 384 * 1024 * 1024;
+#[cfg(target_arch = "wasm32")]
+pub const DEFAULT_NATIVE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// Most jobs the worker renders in one parallel pass.
 const BATCH: usize = 32;
 

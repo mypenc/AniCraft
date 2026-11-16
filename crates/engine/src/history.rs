@@ -37,8 +37,11 @@ pub struct Snapshot {
     pub bytes: usize,
 }
 
-/// Default memory budget for undo history.
+/// Default memory budget for undo history (smaller in the browser, where memory is never returned).
+#[cfg(not(target_arch = "wasm32"))]
 pub const DEFAULT_BUDGET_BYTES: usize = 512 * 1024 * 1024;
+#[cfg(target_arch = "wasm32")]
+pub const DEFAULT_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 /// Hard cap on steps, whatever their size.
 pub const MAX_STEPS: usize = 10_000;
 

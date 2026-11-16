@@ -1,0 +1,36 @@
+# Keeps this fork's main level with storytold/anicraft and republishes the Pages build.
+name: Sync upstream
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Merge upstream/main
+        id: merge
+        run: |
+          git config user.name "mypenc"
+          git config user.email "mypenc@users.noreply.github.com"
+          git remote add upstream https://github.com/storytold/anicraft.git
+          git fetch upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git merge upstream/main -m "Merge upstream/main into fork"
+            git push origin HEAD:main
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      # Pushes made with GITHUB_TOKEN don't trigger workflows, so start the Pages build directly.
+      - name: Rebuild Pages
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref main
