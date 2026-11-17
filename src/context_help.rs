@@ -79,12 +79,14 @@ pub enum Dialog {
     Recover,
     Updates,
     ManageWorkspaces,
+    SaveAsCommand,
+    ManageSavedCommands,
     Palette,
     CloseUnsaved,
 }
 
 impl Dialog {
-    pub const ALL: [Dialog; 25] = [
+    pub const ALL: [Dialog; 27] = [
         Dialog::Preferences,
         Dialog::Shortcuts,
         Dialog::Licenses,
@@ -108,6 +110,8 @@ impl Dialog {
         Dialog::Recover,
         Dialog::Updates,
         Dialog::ManageWorkspaces,
+        Dialog::SaveAsCommand,
+        Dialog::ManageSavedCommands,
         Dialog::Palette,
         Dialog::CloseUnsaved,
     ];
@@ -136,6 +140,8 @@ impl Dialog {
             Dialog::SoundEnvelope => "envelope_editor",
             Dialog::Recover => "recover_window",
             Dialog::ManageWorkspaces => "manage_workspaces",
+            Dialog::SaveAsCommand => "save_as_command",
+            Dialog::ManageSavedCommands => "manage_saved_commands",
             Dialog::Updates | Dialog::PluginSettings | Dialog::Palette | Dialog::CloseUnsaved => return None,
         })
     }
@@ -165,6 +171,8 @@ impl Dialog {
             Dialog::Recover => "getting-started.md#autosave-and-crash-recovery",
             Dialog::Updates => "getting-started.md#install-anicraft",
             Dialog::ManageWorkspaces => "workspace.md#workspaces",
+            Dialog::SaveAsCommand => "saved-commands.md#saving-steps-as-a-command",
+            Dialog::ManageSavedCommands => "saved-commands.md#managing-saved-commands",
             Dialog::Palette => "workspace.md#the-command-palette",
             Dialog::CloseUnsaved => "getting-started.md#save-your-work",
         }
@@ -202,6 +210,7 @@ pub const COMMAND_TOPICS: &[(&str, &str)] = &[
     ("instance.", "symbols-and-library.md#instance-properties"),
     ("layer.", "timeline.md#layers"),
     ("library.", "symbols-and-library.md#the-library-panel"),
+    ("macro.", "saved-commands.md#saving-steps-as-a-command"),
     ("modify.", "drawing.md#transforming-artwork"),
     ("modify.convert_to_symbol", "symbols-and-library.md#making-a-symbol"),
     ("motion.", "tweens.md#motion-tweens"),

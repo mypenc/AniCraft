@@ -57,6 +57,7 @@ pub const PAGES: &[Page] = &[
     page!("opening-animate-files.md"),
     page!("preferences-shortcuts-accessibility.md"),
     page!("plugins.md"),
+    page!("saved-commands.md"),
     page!("working-headless.md"),
     page!("using-this-guide.md"),
     page!("troubleshooting-and-faq.md"),
