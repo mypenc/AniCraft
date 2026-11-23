@@ -6,13 +6,13 @@
    of plain structs (stage, timelines, layers, keyframes, elements, symbols). Nothing animates by
    mutating state: the picture at frame *f* is `evaluate(document, f) -> DisplayList`, a pure
    function. Playback, scrubbing, export, onion skin and tests are all calls to that function.
-2. **One oracle renderer.** The CPU renderer is deterministic and is the reference. Faster
-   renderers (wgpu, M3) must match it within a tolerance in golden tests. Agents and CI trust
-   CPU pixels.
+2. **One oracle renderer.** The CPU renderer is deterministic and is the reference. The GPU
+   stage (`anicraft-gpu`) must match it within a tolerance in its parity tests. Exports, agents
+   and CI use CPU pixels.
 3. **Everything is a command.** Every user-visible action is a `CommandSpec` in the engine
    (id, label, menu path, shortcut, params doc, `run`). The egui shell, the CLI, the JSON-lines
-   channel and (M2) the MCP server dispatch the same ids, so headless parity holds by
-   construction. Menus are generated from the registry.
+   channel, the MCP server and the live control port dispatch the same ids, so headless parity
+   holds by construction. Menus are generated from the registry.
 4. **Thin UI.** The egui layer holds only view state (zoom, pan, active tool, panel sizes,
    hover). It reads the session and emits commands. No document logic lives in the UI.
 5. **Layered crates, enforced.** A crate depends only on lower layers. Nothing below the shell
@@ -30,33 +30,47 @@ app/                         workspace root; the root package is the desktop app
   crates/
     geom      L0  Vec2, Affine (+ decompose/compose for tweening), Rect, Path, flattening, hit test,
                   planar merge (merge drawing, ADR 0031), brush sweeps (ADR 0033)
+    xml       L0  Bounded XML element reader shared by the importers (XFL, SVG)
     plugins   L0  WebAssembly plug-in sandbox (wasmi): ABI v1, limits, manifest, registry (ADR 0017)
     audio     L0  Sound decoding (WAV, Ogg Vorbis, MP3), pure mixing/resampling, WAV, waveform peaks
     actions   L0  Timeline action IR: stop/play/goto, instance targets, button events, frame scripts
+    guide     L0  The user guide (docs/guide) as a bundled static HTML book (ADR 0069)
     doc       L1  Document model + timeline evaluation (keyframes, tweens, easing, symbols) + player
-    render    L2  CPU oracle rasterizer, paints/gradients, compositor, PNG encode
+    text      L1  Fonts on this computer, shaping and line layout into outlines (ADR 0012)
+    render    L2  CPU oracle rasterizer, paints/gradients, compositor, PNG encode; SVG, Lottie and
+                  HTML Canvas writers
+    xfl       L2  XFL/FLA import (ADR 0009, 0054)
+    svg       L2  SVG import (ADR 0021)
     engine    L3  Session (document + history + selection + playhead), command registry, file format
     gpu       L3  wgpu stage renderer over the oracle's prepared fills (ADR 0019, 0029, 0032, 0048; shell feature `gpu-stage`, on by default)
-    cli       L4  `anicraft-cli`: info / render / render-seq / commands / run / serve (JSON-lines)
+    cli       L4  `anicraft-cli`: info / render / render-seq / commands / exec / run / new / guide /
+                  serve (JSON-lines) / mcp, and the live control port's server (ADR 0104)
   src/        L5  egui shell: menus (from registry), tools, stage, timeline, properties, library
   docs/           requirements, architecture, roadmap
 ```
 
+The map in `AGENTS.md` is the one `src/architecture_tests.rs` checks against the crates; this
+table says what each crate builds on. Codecs and containers shared by the Craft apps (image,
+audio, zip, XML, SVG, Lottie, the `.anicraft` envelope) come from storytold/craft-libs,
+pinned by `rev` in the workspace `Cargo.toml`.
+
 | Layer | Crate | May depend on |
 |---|---|---|
-| L0 | `anicraft-geom` | std, serde |
+| L0 | `anicraft-geom` | std, serde, i_overlay (polygon unions, ADR 0110) |
+| L0 | `anicraft-xml` | craft-xml, craft-xfl |
 | L0 | `anicraft-plugins` | wasmi, serde_json (knows nothing of documents; the engine is its host) |
-| L0 | `anicraft-audio` | std, lewton, nanomp3 |
+| L0 | `anicraft-audio` | craft-audio |
 | L0 | `anicraft-actions` | serde (knows nothing of documents: targets are name paths) |
-| L1 | `anicraft-doc` | geom, audio, actions |
-| L2 | `anicraft-render` | geom, doc, rayon, png |
-| L3 | `anicraft-engine` | geom, doc, render, serde_json |
+| L0 | `anicraft-guide` | craft-html, pulldown-cmark |
+| L1 | `anicraft-doc` | geom, audio, actions, craft-image-codecs, craft-palette, craft-mime |
+| L1 | `anicraft-text` | geom, fontdb, harfrust, skrifa |
+| L2 | `anicraft-render` | geom, doc, rayon, craft-image-codecs, craft-svg, craft-lottie, craft-html |
+| L2 | `anicraft-xfl` | geom, doc, xml, text, craft-xfl, craft-video |
+| L2 | `anicraft-svg` | geom, doc, xml, text, craft-svg |
+| L3 | `anicraft-engine` | geom, doc, render, xfl, svg, text, plugins, serde_json, the craft-libs codecs and the `.anicraft` envelope |
 | L3 | `anicraft-gpu` | geom, doc, render, wgpu (the version egui brings), pollster, bytemuck |
-| L4 | `anicraft-cli` | engine (+ lower) |
-| L5 | `anicraft` (shell) | engine (+ lower), eframe/egui |
-
-Planned crates: `io` (L3, XFL/SVG/Lottie/GIF),
-`automation` (L4, MCP), `testkit`.
+| L4 | `anicraft-cli` | engine (+ lower), guide |
+| L5 | `anicraft` (shell) | cli, engine (+ lower), eframe/egui |
 
 ## 3. Document model (`anicraft-doc`)
 
@@ -66,7 +80,7 @@ Document
 ├── timeline: Timeline                 (main scene; scenes list arrives in M2)
 │   └── layers: [Layer]                (index 0 = top of the stack, as in the timeline panel)
 │       ├── name, visible, locked, outline, depth, volume, muted, kind (Normal | Guide | Mask | Folder | Camera | Armature),
-│       │   armature?: bones joining symbol instances (armature layer; ADR 0043)
+│       │   armature?: bones joining symbol instances and shapes (armature layer; ADR 0043, 0098)
 │       └── keyframes: [Keyframe]      (sorted by start, spans do not overlap)
 │           ├── start, duration        (frames covered by this keyframe)
 │           ├── elements: [Element]
@@ -105,7 +119,11 @@ parent, the child turning about it) and each keyframe's `pose` holds joint angle
 the span's eased time. `evaluate_layer_elements` places the instances by forward kinematics
 (`W_child = R_joint(angle) · W_parent · rest`), so every export and the player see poses;
 `armature::solve` finds a pose from a dragged bone end by cyclic coordinate descent with joint
-limits and pins.
+limits and pins. An armature may be **mixed** (ADR 0098): a bone marked with a shape
+(`Bone.shape`) is inside it and bends its outline through that shape's skin (`Armature.skins`,
+ADR 0071); any other bone moves an element, an instance or a whole shape. One pose, solver and
+tween serve both. A document with a mixed armature is written as format version 4; every other
+document as version 3, as before.
 
 **The camera** (ADR 0027): a scene's top layer may be its camera layer. `evaluate` (every
 export), `evaluate_player` and `evaluate_scene_camera` draw each top-level layer through
@@ -162,7 +180,8 @@ frame changes), and `doc::sound::trigger` turns them into voices for Test Movie.
 DisplayList ──► for each item:
                   flatten Bézier path under (view × item) transform, tolerance 0.1 px
                   ├─ fill:   lines ──► signed-area coverage accumulator (bbox-sized)
-                  └─ stroke: polylines ──► stroker (segment quads + joins/caps, dashes; ADR 0046) ──► accumulator
+                  └─ stroke: polylines ──► stroker (one outline per run of segments with its joins and
+                             caps, dashes; ADR 0046) ──► union of the outlines (ADR 0110) ──► accumulator
                 coverage ──► fill rule (non-zero / even-odd) ──► paint shader ──► src-over blend
                            (rows of the bbox in parallel with rayon)
 ```
@@ -208,6 +227,10 @@ engine itself never depends on the GPU.
 
 ## 5. Engine (`anicraft-engine`)
 
+* One `Session` is one open document. The desktop app keeps several (ADR 0112): the one being
+  edited is `App::s`, the others are parked whole in their tabs (`src/tabs.rs`) and exchanged
+  when a tab is shown; `Session::take_shared` hands the clipboards, tool style and plug-ins
+  from one to the next. The CLI and MCP have one session.
 * `Session` owns the `Document` (a **persistent, structurally shared tree**: layers,
   keyframes, elements, paths and symbols live behind `Arc`, mutated only via `Arc::make_mut`),
   the content `state` id, the save point, the playhead, the active layer, the selection, a
@@ -221,10 +244,13 @@ engine itself never depends on the GPU.
 * `CommandSpec { id, label, menu, shortcut, params, run }`. `run(&mut Session, &Value) ->
   Result<Value, EngineError>`. The registry (`commands()`) is the single list the shell, CLI and
   agents read. `Session::execute(id, params)` handles undo snapshots for mutating commands.
-* **File format** `.anicraft` v2: JSON `{ "format", "version": 2, "paths": [svg…], "document" }`
-  with paths as SVG path strings, shared paths written once and streamed back as shared `Arc`s.
-  v1 files still load; unknown fields are ignored and missing fields default. See
-  [ADR 0003](adr/0003-file-format-v2.md).
+* **File format** `.anicraft`: JSON `{ "format", "version", "paths": [svg…], "document" }`
+  with paths as SVG path strings, shared paths written once and streamed back as shared `Arc`s
+  ([ADR 0003](adr/0003-file-format-v2.md)). A document is written as version 3, or as version
+  4 when it has a mixed armature ([ADR 0098](adr/0098-mixed-armatures.md)); versions 1 to 4
+  load, and a higher one is refused with a message naming it. Missing fields default. Unknown
+  fields are ignored, so a build older than a feature opens that feature's file without it and
+  leaves it out when it saves (see `docs/reviews/2026-11-principal-review.md`, finding 1).
 * **Files go through `vfs`.** Commands read and write files through `anicraft_engine::vfs`,
   never `std::fs` directly, and only on the command's own thread. On the desktop `vfs` is the
   file system. In the web build it is an in-memory store: the shell fills it from the
@@ -240,11 +266,16 @@ anicraft-cli render-seq <file|--sample> --out-dir dir [--from A --to B]
 anicraft-cli commands                       # registry as JSON (id, label, menu, params)
 anicraft-cli run <file|--sample> <script.json> [--save out.anicraft]
 anicraft-cli serve [file]                   # JSON-lines: {"id":1,"cmd":"draw.rect","params":{…}}
+anicraft-cli mcp --automation-read-root <dir> --automation-write-root <dir> [file]
 ```
 
 `serve` keeps one session alive and answers each request line with
-`{"id":…, "ok":true, "result":…}` or `{"id":…, "ok":false, "error":"…"}`. The MCP server (M2)
-is a thin adapter over the same loop.
+`{"id":…, "ok":true, "result":…}` or `{"id":…, "ok":false, "error":"…"}`. The MCP server
+([docs/mcp.md](mcp.md)) is an adapter over the same dispatcher and refuses to start without its
+automation roots ([ADR 0124](adr/0124-automation-roots.md)); the desktop app's live control
+port ([ADR 0104](adr/0104-live-control-port.md), [docs/control-protocol.md](control-protocol.md))
+serves the same tools on the open window. `anicraft-cli` with no arguments lists every
+subcommand (`exec`, `new`, `guide`, `bench` and the rest).
 
 ## 7. Desktop shell (`anicraft`)
 
@@ -260,9 +291,11 @@ looks the English up in the craft-i18n catalogs build.rs embedded, and menus tra
 registry's labels, so nothing below the shell (commands, the CLI, MCP, the file format) sees
 another language.
 
-The stage texture comes from the CPU renderer and is cached per
-`(revision, frame, zoom, viewport)`. Overlays (selection boxes, drag previews, the stage frame)
-are drawn with the egui painter in screen space.
+The stage is drawn in tiles by the engine's `RenderService`: on the graphics card by default
+(section 4, "GPU stage"), and by the CPU renderer when there is no usable card, in the web
+build, and for anything the GPU can't draw. Tiles are cached per `(state, frame, view)`.
+Overlays (selection boxes, drag previews, the stage frame) are drawn with the egui painter in
+screen space.
 
 `--screenshot <file.png>` runs the normal UI for about 120 frames, then saves the window picture
 and exits. CI and Craft Anything use it for visual checks.
@@ -283,4 +316,4 @@ preferences and autosave, and a WebGL2 window with the CPU-drawn stage.
 | Round trip | engine | save → load → identical document; render identical before and after |
 | CLI | cli | render produces a PNG of stage size with non-background pixels |
 | Visual | shell | `--screenshot` produces a non-blank image |
-| Perf (M2) | benches | criterion benches for flatten, rasterize, evaluate at 1080p with 1,000 shapes |
+| Perf | cli, gpu | `anicraft-cli bench --check` and `gpu_bench --check` hold the budgets in [performance.md](performance.md) |

@@ -67,7 +67,7 @@ impl Affine {
         self.m[0] * self.m[3] - self.m[1] * self.m[2]
     }
 
-    /// Inverse, or `None` for a singular (or non-finite) matrix.
+    /// Inverse, or `None` for a singular matrix or non-finite input or result.
     pub fn inverse(&self) -> Option<Affine> {
         let det = self.determinant();
         if !det.is_finite() || det.abs() < 1e-12 {
@@ -79,7 +79,9 @@ impl Affine {
         let ib = -b * inv;
         let ic = -c * inv;
         let id = a * inv;
-        Some(Affine { m: [ia, ib, ic, id, -(ia * e + ic * f), -(ib * e + id * f)] })
+        let inverse = Affine { m: [ia, ib, ic, id, -(ia * e + ic * f), -(ib * e + id * f)] };
+        // A finite determinant does not cover translation or overflow in the inverse.
+        inverse.is_finite().then_some(inverse)
     }
 
     pub fn translation(&self) -> Vec2 {
@@ -99,15 +101,16 @@ impl Affine {
     pub fn decompose(&self) -> Decomposed {
         let [a, b, c, d, e, f] = self.m;
         let sx = (a * a + b * b).sqrt();
-        let rotation = b.atan2(a);
         let det = a * d - b * c;
-        let (sy, skew) = if sx > 1e-12 {
+        let (rotation, sy, skew) = if sx > 1e-12 {
             let sy = det / sx;
             // col1 · col2 = sx · sy · skew
             let skew = if det.abs() > 1e-12 { (a * c + b * d) / det } else { 0.0 };
-            (sy, skew)
+            (b.atan2(a), sy, skew)
         } else {
-            ((c * c + d * d).sqrt(), 0.0)
+            // Degenerate first column: take the rotation from the second column, which
+            // `compose` maps to (-sin r, cos r) · sy.
+            ((-c).atan2(d), (c * c + d * d).sqrt(), 0.0)
         };
         Decomposed { tx: e, ty: f, sx, sy, rotation, skew }
     }
@@ -145,12 +148,13 @@ impl Decomposed {
     /// Component-wise interpolation; rotation takes the shortest arc.
     pub fn lerp(&self, o: &Decomposed, t: f32) -> Decomposed {
         let mut dr = o.rotation - self.rotation;
-        let tau = std::f32::consts::TAU;
-        while dr > std::f32::consts::PI {
-            dr -= tau;
-        }
-        while dr < -std::f32::consts::PI {
-            dr += tau;
+        if dr.is_finite() {
+            let pi = std::f32::consts::PI;
+            if dr > pi || dr < -pi {
+                dr = (dr + pi).rem_euclid(std::f32::consts::TAU) - pi;
+            }
+        } else {
+            dr = 0.0;
         }
         Decomposed {
             tx: crate::lerp(self.tx, o.tx, t),
@@ -172,11 +176,37 @@ mod tests {
     }
 
     #[test]
+    fn decompose_roundtrip_zero_sx() {
+        for m in [[0.0, 0.0, -1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0, 3.0, 4.0], [0.0, 0.0, 2.0, -3.0, 1.0, 1.0]] {
+            let m = Affine { m };
+            assert!(close(&m.decompose().compose(), &m), "{:?}", m.decompose().compose());
+        }
+    }
+
+    #[test]
     fn inverse_roundtrip() {
         let m = Affine::translate(10.0, -4.0).mul(&Affine::rotate(0.7)).mul(&Affine::scale(2.0, 0.5));
         let inv = m.inverse().unwrap();
         assert!(close(&m.mul(&inv), &Affine::IDENTITY));
         assert!(Affine::scale(0.0, 1.0).inverse().is_none());
+    }
+
+    #[test]
+    fn inverse_rejects_non_finite_coefficients() {
+        for value in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            for index in 0..6 {
+                let mut m = Affine::IDENTITY;
+                m.m[index] = value;
+                assert!(m.inverse().is_none(), "{m:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn inverse_rejects_overflow_from_finite_coefficients() {
+        let m = Affine { m: [0.5, 0.0, 0.0, 0.5, f32::MAX, 0.0] };
+        assert!(m.is_finite());
+        assert!(m.inverse().is_none());
     }
 
     #[test]
@@ -201,5 +231,23 @@ mod tests {
     fn apply_order() {
         let m = Affine::translate(10.0, 0.0).mul(&Affine::scale(2.0, 2.0));
         assert_eq!(m.apply(Vec2::new(1.0, 1.0)), Vec2::new(12.0, 2.0));
+    }
+
+    #[test]
+    fn lerp_huge_rotation_terminates() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let a = Decomposed::default();
+            let r: Vec<f32> = [1e9_f32, f32::INFINITY, f32::NAN]
+                .iter()
+                .map(|&rot| a.lerp(&Decomposed { rotation: rot, ..Default::default() }, 0.5).rotation)
+                .collect();
+            let _ = tx.send(r);
+        });
+        let r = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("lerp did not terminate");
+        assert!(r.iter().all(|x| x.is_finite()), "{r:?}");
+        let d = Decomposed { rotation: 3.0, ..Default::default() };
+        let e = Decomposed { rotation: -3.0, ..Default::default() };
+        assert!((d.lerp(&e, 0.5).rotation - std::f32::consts::PI).abs() < 1e-5);
     }
 }

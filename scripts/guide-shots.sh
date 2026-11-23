@@ -21,6 +21,7 @@ APP="$TARGET_DIR/debug/anicraft"
 # picture name, then the --open state ("-" for the window as it starts)
 SHOTS=(
   "workspace -"
+  "document-tabs tabs"
   "start-screen start"
   "library library"
   "onion-skin timelinepolish"
@@ -28,6 +29,10 @@ SHOTS=(
   "test-movie testmovieinside"
   "publish-settings publish"
   "preferences prefs"
+  "audio-to-keyframes audiokeys"
+  "lip-sync lipsynced"
+  "data-chart datachart"
+  "data-table datatable"
 )
 mkdir -p "$OUT"
 for row in "${SHOTS[@]}"; do

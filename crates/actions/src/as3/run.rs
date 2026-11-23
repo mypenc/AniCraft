@@ -51,6 +51,9 @@ pub trait World {
     fn set(&mut self, at: &Place, p: Property, v: f64) -> Result<(), Option<String>>;
     /// Sets a text field's text (ADR 0066).
     fn set_text(&mut self, at: &Place, text: String) -> Result<(), Option<String>>;
+    /// Sets another member of a text field (`htmlText`: text; `maxChars`: a number;
+    /// `restrict`: text or `null`; ADR 0107).
+    fn set_field(&mut self, at: &Place, p: Prop, v: Value) -> Result<(), Option<String>>;
     fn trace(&mut self, line: String);
     /// A timeline variable's value, and writing one (the world knows its type).
     fn read(&mut self, name: &str) -> Result<Value, String>;
@@ -119,6 +122,10 @@ pub fn round(x: f64) -> f64 {
     if !x.is_finite() {
         return x;
     }
+    // Negative fractions rounded to zero keep their sign, so their reciprocal is -Infinity.
+    if (-0.5..0.0).contains(&x) {
+        return -0.0;
+    }
     let f = x.floor();
     if x - f >= 0.5 { f + 1.0 } else { f }
 }
@@ -130,7 +137,11 @@ fn min_max(vals: &[f64], max: bool) -> f64 {
         if v.is_nan() {
             return f64::NAN;
         }
-        if (max && v > out) || (!max && v < out) {
+        // Equal zeros prefer +0 for max and -0 for min, regardless of argument order.
+        if (max && v > out)
+            || (!max && v < out)
+            || (v == 0.0 && out == 0.0 && v.is_sign_positive() == max)
+        {
             out = v;
         }
     }
@@ -350,6 +361,7 @@ impl Vm<'_> {
                 self.w.get(at, prop).map_err(|message| Stop::Error { line: self.line, message })
             }
             LValue::Text { at } => self.w.get(at, Prop::Text).map_err(|message| Stop::Error { line: self.line, message }),
+            LValue::Field { at, p } => self.w.get(at, *p).map_err(|message| Stop::Error { line: self.line, message }),
         }
     }
 
@@ -381,6 +393,25 @@ impl Vm<'_> {
                     return self.err(format!("`text` is set to text, not {}", v.text()));
                 }
                 self.w.set_text(at, v.text()).map_err(|e| lift(self.line, e))?;
+                Ok(v)
+            }
+            LValue::Field { at, p } => {
+                let v = match p {
+                    Prop::HtmlText if matches!(v, Value::Null | Value::Undefined) => return self.err(format!("`htmlText` is set to text, not {}", v.text())),
+                    Prop::HtmlText => Value::str(&v.text()),
+                    Prop::MaxChars => {
+                        let n = v.number();
+                        if !n.is_finite() {
+                            return self.err(format!("`maxChars` is set to a number, not {}", shown(&v)));
+                        }
+                        // An `int`: whole, and never negative here (0 is no limit).
+                        Value::Num(n.trunc().clamp(0.0, 2_147_483_647.0) + 0.0)
+                    }
+                    Prop::Restrict if matches!(v, Value::Null | Value::Undefined) => Value::Null,
+                    Prop::Restrict => Value::str(&v.text()),
+                    _ => return self.err(format!("`{}` can only be read", p.name())),
+                };
+                self.w.set_field(at, *p, v.clone()).map_err(|e| lift(self.line, e))?;
                 Ok(v)
             }
         }
@@ -534,5 +565,34 @@ fn prop_name(p: Property) -> &'static str {
         Property::Rotation => "rotation",
         Property::ScaleX => "scaleX",
         Property::ScaleY => "scaleY",
+    }
+}
+
+#[cfg(test)]
+mod min_max_tests {
+    use super::{min_max, round};
+
+    #[test]
+    fn signed_zero_ties_are_independent_of_argument_order() {
+        for vals in [[-0.0, 0.0], [0.0, -0.0], [round(-0.4), 0.0], [0.0, round(-0.4)]] {
+            assert_eq!(min_max(&vals, true).to_bits(), 0.0_f64.to_bits());
+            assert_eq!(min_max(&vals, false).to_bits(), (-0.0_f64).to_bits());
+        }
+        for zero in [-0.0_f64, 0.0_f64] {
+            assert_eq!(min_max(&[zero, zero], true).to_bits(), zero.to_bits());
+            assert_eq!(min_max(&[zero, zero], false).to_bits(), zero.to_bits());
+        }
+    }
+
+    #[test]
+    fn zero_tie_handling_preserves_other_min_max_rules() {
+        assert_eq!(min_max(&[], true), f64::NEG_INFINITY);
+        assert_eq!(min_max(&[], false), f64::INFINITY);
+        for max in [false, true] {
+            assert!(min_max(&[0.0, f64::NAN], max).is_nan());
+            assert!(min_max(&[f64::NAN, -0.0], max).is_nan());
+        }
+        assert_eq!(min_max(&[-1.0, -0.0, 0.0, 1.0], true), 1.0);
+        assert_eq!(min_max(&[-1.0, -0.0, 0.0, 1.0], false), -1.0);
     }
 }

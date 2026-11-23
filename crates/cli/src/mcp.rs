@@ -6,10 +6,20 @@
 //! frame as a picture. Everything still goes through `Session::execute`, so undo, validation
 //! and the confirmation tiers (ADR 0004: `"confirm": true` before irreversible loss) apply to
 //! an assistant exactly as to the app.
+//!
+//! The same tools drive the desktop app live (ADR 0104): the app runs [`call_tool`] on its own
+//! session for requests from its control port, and `anicraft-cli mcp --bridge <port>` is this
+//! server with a [`Backend`] that forwards each tool call there (`crate::control`).
+//!
+//! An assistant's commands touch files inside the automation roots only (ADR 0124): the
+//! server refuses to start without `--automation-read-root` and `--automation-write-root`
+//! ([`Headless`]), and the bridge sends its roots with every call for the app to apply.
 
+use anicraft_engine::access::Roots;
 use anicraft_engine::{Session, commands};
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
+use std::sync::Arc;
 
 /// Protocol revisions this server speaks, newest first.
 const PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -20,15 +30,18 @@ const MAX_PICTURE_EDGE: f32 = 2048.0;
 /// Most steps in one `anicraft_run_script` call.
 const MAX_STEPS: usize = 10_000;
 
-const INSTRUCTIONS: &str = "AniCraft is a 2D animation studio. Every edit is a command: call \
+/// The headless server's instructions (an in-process document no one sees).
+pub const INSTRUCTIONS: &str = "AniCraft is a 2D animation studio. Every edit is a command: call \
 anicraft_commands to find one (filter by words such as 'tween' or 'export'), then anicraft_run \
 with its id and params, or anicraft_run_script for several in order. Frames in params are \
 0-based. Commands act on the current scene, layer, frame and selection, which anicraft_document \
 reports. Use anicraft_render to see a frame. Edits can be undone with edit.undo. Commands that \
 would lose work or replace a file refuse until params include \"confirm\": true; ask the person \
-before confirming.";
+before confirming. Files can be read only inside the automation read root and written only inside the \
+automation write root the person gave this server; an error names them.";
 
-fn tools() -> Value {
+/// The tools, as `tools/list` returns them. The desktop app's control port lists the same.
+pub fn tools() -> Value {
     json!([
         {
             "name": "anicraft_commands",
@@ -95,21 +108,54 @@ fn error(id: Value, code: i64, message: impl Into<String>) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message.into()}})
 }
 
-fn text_result(v: &Value, is_error: bool) -> Value {
+/// A tool result holding `v` as text (pretty JSON unless it is a string).
+pub fn text_result(v: &Value, is_error: bool) -> Value {
     let text = if let Value::String(s) = v { s.clone() } else { serde_json::to_string_pretty(v).unwrap_or_default() };
     json!({"content": [{"type": "text", "text": text}], "isError": is_error})
 }
 
+/// Where tools run: a session, and how a command runs on it. The headless server uses the
+/// [`Session`] itself; the desktop app runs commands through its own follow-up (the status
+/// line, the view a new document resets), as for the person's own edits.
+pub trait Host {
+    fn session(&self) -> &Session;
+    /// Runs one command; the error is the engine's message.
+    fn execute(&mut self, id: &str, params: &Value) -> Result<Value, String>;
+}
+
+impl Host for Session {
+    fn session(&self) -> &Session {
+        self
+    }
+    fn execute(&mut self, id: &str, params: &Value) -> Result<Value, String> {
+        Session::execute(self, id, params).map_err(|e| e.to_string())
+    }
+}
+
+/// Whether a tool can change the document (the app holds these back while the person is in
+/// the middle of a drag or typing, so the two edits never share an undo step).
+pub fn tool_changes_document(name: &str) -> bool {
+    !matches!(name, "anicraft_commands" | "anicraft_document" | "anicraft_render")
+}
+
+/// Runs one tool with no automation roots: for callers that are not an agent's entry point
+/// (tests, an embedding program that has already decided what may be touched).
+pub fn call_tool<H: Host + ?Sized>(h: &mut H, name: &str, args: &Value) -> Result<Value, String> {
+    call_tool_in(h, name, args, None)
+}
+
 /// Runs one tool. Tool failures are results with `isError` (so the assistant can read and
-/// correct them); only malformed calls are protocol errors.
-fn call_tool(s: &mut Session, name: &str, args: &Value) -> Result<Value, String> {
-    let run = |s: &mut Session, step: &Value| -> Result<Value, String> {
+/// correct them); only malformed calls are protocol errors. With `roots`, each command reads
+/// and writes files inside them only (ADR 0124).
+pub fn call_tool_in<H: Host + ?Sized>(h: &mut H, name: &str, args: &Value, roots: Option<&Arc<Roots>>) -> Result<Value, String> {
+    let run = |h: &mut H, step: &Value| -> Result<Value, String> {
         let id = step.get("command").and_then(Value::as_str).ok_or("missing \"command\"")?;
         let params = step.get("params").cloned().unwrap_or_else(|| json!({}));
         if !params.is_object() {
             return Err(format!("{id}: \"params\" must be an object"));
         }
-        s.execute(id, &params).map_err(|e| format!("{id}: {e}"))
+        crate::refuse_remote_ffmpeg(id, &params).map_err(|e| format!("{id}: {e}"))?;
+        crate::execute_in(roots, || h.execute(id, &params)).map_err(|e| format!("{id}: {e}"))
     };
     Ok(match name {
         "anicraft_commands" => {
@@ -125,8 +171,11 @@ fn call_tool(s: &mut Session, name: &str, args: &Value) -> Result<Value, String>
                 .collect();
             text_result(&Value::Array(list), false)
         }
-        "anicraft_run" => match run(s, args) {
-            Ok(v) => text_result(&json!({"result": v, "revision": s.revision, "frame": s.frame, "scene": s.scene}), false),
+        "anicraft_run" => match run(h, args) {
+            Ok(v) => {
+                let s = h.session();
+                text_result(&json!({"result": v, "revision": s.revision, "frame": s.frame, "scene": s.scene}), false)
+            }
             Err(e) => text_result(&Value::String(e), true),
         },
         "anicraft_run_script" => {
@@ -136,15 +185,17 @@ fn call_tool(s: &mut Session, name: &str, args: &Value) -> Result<Value, String>
             }
             let mut results = Vec::with_capacity(steps.len());
             for (i, step) in steps.iter().enumerate() {
-                match run(s, step) {
+                match run(h, step) {
                     Ok(v) => results.push(v),
                     Err(e) => return Ok(text_result(&json!({"failed_step": i + 1, "error": e, "done": results}), true)),
                 }
             }
+            let s = h.session();
             text_result(&json!({"results": results, "revision": s.revision, "frame": s.frame}), false)
         }
-        "anicraft_document" => text_result(&s.info(), false),
+        "anicraft_document" => text_result(&h.session().info(), false),
         "anicraft_render" => {
+            let s = h.session();
             let frame = match args.get("frame") {
                 None | Some(Value::Null) => s.frame,
                 Some(v) => v.as_u64().and_then(|f| u32::try_from(f).ok()).ok_or("\"frame\" must be a whole number from 0")?,
@@ -164,7 +215,7 @@ fn call_tool(s: &mut Session, name: &str, args: &Value) -> Result<Value, String>
             json!({
                 "content": [
                     {"type": "image", "data": anicraft_doc::base64_encode(&png), "mimeType": "image/png"},
-                    {"type": "text", "text": format!("Frame {frame} of scene {} at {:.0}% ({}Ã—{} stage).", s.scene, scale * 100.0, stage.width, stage.height)}
+                    {"type": "text", "text": format!("Frame {frame} of scene {} at {:.0}% ({}×{} stage).", s.scene, scale * 100.0, stage.width, stage.height)}
                 ],
                 "isError": false
             })
@@ -173,8 +224,41 @@ fn call_tool(s: &mut Session, name: &str, args: &Value) -> Result<Value, String>
     })
 }
 
+/// What answers `tools/call`: the in-process session (headless), or the desktop app through
+/// its control port (`--bridge`, `crate::control::Bridge`).
+pub trait Backend {
+    /// The `instructions` the server gives the assistant at `initialize`.
+    fn instructions(&self) -> &'static str;
+    /// A `tools/call` result, or the message of a protocol error (a malformed call).
+    fn call(&mut self, name: &str, args: &Value) -> Result<Value, String>;
+}
+
+impl Backend for Session {
+    fn instructions(&self) -> &'static str {
+        INSTRUCTIONS
+    }
+    fn call(&mut self, name: &str, args: &Value) -> Result<Value, String> {
+        call_tool(self, name, args)
+    }
+}
+
+/// What `anicraft-cli mcp` serves: a session whose commands stay inside the automation roots.
+pub struct Headless {
+    pub session: Session,
+    pub roots: Arc<Roots>,
+}
+
+impl Backend for Headless {
+    fn instructions(&self) -> &'static str {
+        INSTRUCTIONS
+    }
+    fn call(&mut self, name: &str, args: &Value) -> Result<Value, String> {
+        call_tool_in(&mut self.session, name, args, Some(&self.roots))
+    }
+}
+
 /// Answers one JSON-RPC message; `None` for notifications (and responses), which get no reply.
-pub fn handle(s: &mut Session, line: &str) -> Option<Value> {
+pub fn handle<B: Backend + ?Sized>(s: &mut B, line: &str) -> Option<Value> {
     let msg: Value = match serde_json::from_str(line.trim_start_matches('\u{feff}')) {
         Ok(v) => v,
         Err(e) => return Some(error(Value::Null, -32700, format!("parse error: {e}"))),
@@ -198,7 +282,7 @@ pub fn handle(s: &mut Session, line: &str) -> Option<Value> {
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": false}},
                 "serverInfo": {"name": "anicraft", "title": "AniCraft", "version": env!("CARGO_PKG_VERSION")},
-                "instructions": INSTRUCTIONS
+                "instructions": s.instructions()
             })
         }
         "ping" => json!({}),
@@ -206,7 +290,7 @@ pub fn handle(s: &mut Session, line: &str) -> Option<Value> {
         "tools/call" => {
             let Some(name) = params.get("name").and_then(Value::as_str) else { return Some(error(id, -32602, "tools/call needs a tool \"name\"")) };
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            match call_tool(s, name, &args) {
+            match s.call(name, &args) {
                 Ok(v) => v,
                 Err(e) => return Some(error(id, -32602, e)),
             }
@@ -218,9 +302,18 @@ pub fn handle(s: &mut Session, line: &str) -> Option<Value> {
 
 /// The stdio loop: one message per line in, one reply per line out, until stdin closes.
 /// Nothing but protocol messages is written to `out` (logs would corrupt the stream).
-pub fn serve<R: BufRead, W: Write>(s: &mut Session, input: R, out: &mut W) -> std::io::Result<()> {
-    for line in input.lines() {
-        let line = line?;
+pub fn serve<B: Backend + ?Sized, R: BufRead, W: Write>(s: &mut B, input: R, out: &mut W) -> std::io::Result<()> {
+    let mut input = input;
+    loop {
+        let line = match crate::read_line(&mut input, crate::MAX_LINE)? {
+            crate::Line::Eof => break,
+            crate::Line::TooLong => {
+                writeln!(out, "{}", json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "request line too long"}}))?;
+                out.flush()?;
+                continue;
+            }
+            crate::Line::Text(l) => l,
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -266,6 +359,66 @@ mod tests {
         assert_eq!(call(&mut s, 6, "tools/call", json!({"name": "nope"}))["error"]["code"], -32602);
     }
 
+
+    /// The headless server keeps an assistant's commands inside its roots (ADR 0124), and the
+    /// refusal it reads names the root.
+    #[test]
+    fn the_headless_server_reads_and_writes_inside_its_roots_only() {
+        let r = crate::tests::Roots3::new("mcp");
+        let mut h = Headless { session: Session::default(), roots: r.roots.clone() };
+        let mut run = |command: &str, params: Value| {
+            let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "anicraft_run", "arguments": {"command": command, "params": params}}});
+            handle(&mut h, &line.to_string()).unwrap()["result"].clone()
+        };
+        let said = |v: &Value| v["content"][0]["text"].as_str().unwrap_or_default().to_string();
+        assert_eq!(run("draw.rect", json!({"x": 1, "y": 1, "w": 9, "h": 9}))["isError"], false, "commands without files run as ever");
+        let ok = run("file.save_as", json!({"path": r.path(&["out", "a.anicraft"])}));
+        assert_eq!(ok["isError"], false, "{ok}");
+        for (command, params, root) in [
+            ("file.save_as", json!({"path": r.path(&["secret", "a.anicraft"])}), "write"),
+            ("file.save_as", json!({"path": r.path(&["out", "..", "secret", "a.anicraft"])}), "write"),
+            ("file.export_png", json!({"path": r.path(&["work", "f.png"])}), "write"),
+            ("file.export_png", json!({"path": "f.png"}), "write"),
+            ("file.open", json!({"path": r.path(&["secret", "s.json"]), "confirm": true}), "read"),
+            ("macro.run", json!({"path": r.path(&["work", "..", "secret", "s.json"])}), "read"),
+            ("file.open", json!({"path": r.path(&["out", "a.anicraft"]), "confirm": true}), "read"),
+        ] {
+            let v = run(command, params.clone());
+            assert_eq!(v["isError"], true, "{command} {params}");
+            let root_dir = if root == "write" { r.roots.write().unwrap().to_path_buf() } else { r.roots.read()[0].clone() };
+            assert!(said(&v).contains(&format!("automation {root} root")) && said(&v).contains(&anicraft_engine::access::display(&root_dir)), "{}", said(&v));
+        }
+        assert!(!std::path::Path::new(&r.path(&["secret", "a.anicraft"])).exists() && !std::path::Path::new("f.png").exists());
+        // The ffmpeg refusal (#497) is still the first thing checked.
+        let v = run("file.export_video", json!({"path": r.path(&["out", "a.mp4"]), "ffmpeg": "/bin/sh"}));
+        assert!(said(&v).contains("ANICRAFT_FFMPEG"), "{v}");
+        // A script stops at the refused step.
+        let line = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "anicraft_run_script", "arguments": {"steps": [
+            {"command": "draw.rect", "params": {"x": 30, "y": 1, "w": 9, "h": 9}},
+            {"command": "file.export_svg", "params": {"path": r.path(&["secret", "f.svg"])}}
+        ]}}});
+        let v = handle(&mut h, &line.to_string()).unwrap()["result"].clone();
+        assert_eq!((v["isError"].clone(), text(&v)["failed_step"].clone()), (json!(true), json!(2)), "{v}");
+        assert!(init_mentions_roots(&mut h));
+    }
+
+    fn init_mentions_roots(h: &mut Headless) -> bool {
+        let init = handle(h, r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#).unwrap();
+        init["result"]["instructions"].as_str().is_some_and(|t| t.contains("automation read root"))
+    }
+
+    #[test]
+    fn mcp_refuses_a_caller_supplied_ffmpeg() {
+        let mut s = Session::default();
+        for r in [
+            tool(&mut s, "anicraft_run", json!({"command": "file.export_video", "params": {"path": "a.mp4", "ffmpeg": "/bin/sh"}})),
+            tool(&mut s, "anicraft_run_script", json!({"steps": [{"command": "file.export_video", "params": {"path": "a.mp4", "ffmpeg": "/bin/sh"}}]})),
+        ] {
+            assert_eq!(r["isError"], true);
+            assert!(r["content"][0]["text"].as_str().unwrap().contains("ANICRAFT_FFMPEG"), "{r}");
+        }
+    }
+
     #[test]
     fn tools_drive_the_engine() {
         let mut s = Session::default();
@@ -297,9 +450,16 @@ mod tests {
     fn render_returns_a_png_picture() {
         let mut s = Session::new(anicraft_doc::sample::demo());
         let r = tool(&mut s, "anicraft_render", json!({"frame": 3, "scale": 0.25}));
+        assert_eq!(r["isError"], false);
+        assert_eq!(r["content"].as_array().unwrap().len(), 2);
+        assert_eq!(r["content"][1]["type"], "text");
+        assert_eq!(r["content"][1]["text"], "Frame 3 of scene 0 at 25% (1280×720 stage).");
         assert_eq!(r["content"][0]["type"], "image");
         assert_eq!(r["content"][0]["mimeType"], "image/png");
         assert!(r["content"][0]["data"].as_str().unwrap().starts_with("iVBORw0KGgo"), "base64 of the PNG signature");
+        let png = anicraft_doc::base64_decode(r["content"][0]["data"].as_str().unwrap()).unwrap();
+        let pixels = anicraft_doc::decode_png(&png).unwrap();
+        assert_eq!((pixels.width, pixels.height), (320, 180));
         assert_eq!(tool(&mut s, "anicraft_render", json!({"frame": 1_000_000}))["isError"], true);
         assert_eq!(call(&mut s, 7, "tools/call", json!({"name": "anicraft_render", "arguments": {"scale": -1}}))["error"]["code"], -32602);
     }

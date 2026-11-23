@@ -28,9 +28,9 @@ Animator and Designer, plus your own saved workspaces and Reset.
 | Output | The Output panel inside Test Movie, and **Window › Output**, which keeps the last run's lines. |
 | Align | The Align panel on the right, and **Modify › Align**. |
 | History | The History panel on the right. Ctrl+click steps, then Save As Command… ([saved commands](saved-commands.md)). |
-| Color and Swatches | **Window › Colour** (stroke and fill, Swap, Black and White). Click the Fill or Stroke squares in the Tools panel, the Colour panel, or any colour swatch in Properties: web-safe swatches, a mixer and a hex field. The fill's picker also sets its type (None, Solid, Linear, Radial, Bitmap) and a gradient's stops, overflow and Linear RGB, like the Color panel. **Window › Swatches** keeps the document's colours and gradients (click applies to the active stroke or fill, drag to reorder, import and export swatch files and GIMP `.gpl` palettes; not Adobe `.aco`/`.ase`/`.clr`). |
+| Color and Swatches | **Window › Colour** (stroke and fill, Swap, Black and White). Click the Fill or Stroke squares in the Tools panel, the Colour panel, or any colour swatch in Properties: web-safe swatches, a mixer, a hex field and an alpha. A solid fill's alpha is its own (0% is a clear fill, which is not the same as no fill). The fill's picker also sets its type (None, Solid, Linear, Radial, Bitmap) and a gradient's stops, each with its own alpha, overflow and Linear RGB, like the Color panel. **Window › Swatches** keeps the document's colours and gradients (click applies to the active stroke or fill, drag to reorder, import and export swatch files and GIMP `.gpl` palettes; not Adobe `.aco`/`.ase`/`.clr`). |
 | Transform and Info | Position, scale and rotation rows in Properties, and the Free Transform tool. |
-| Scene | The scene menu at the top left of the stage, **Insert › Scene** and **Modify › Scene**. |
+| Scene | The scene menu at the top left of the stage, **Insert › New Scene** and **Modify › Scene**. |
 | Find and Replace | **Edit › Find and Replace** (**Ctrl+F**). |
 | Publish Settings | **File › Publish Settings…** (**Ctrl+Shift+F12**). |
 
@@ -45,7 +45,7 @@ Each tool has the key you already know.
 |---|---|---|
 | Selection | **V** | Selects raw strokes and fills with the dot pattern; drag an edge to bend it. |
 | Subselection | **A** | Points and handles, on raw drawings and drawing objects. |
-| Free Transform | **Q** | Scale, rotate and move; Shift and Alt as you'd expect. |
+| Free Transform | **Q** | Scale, skew (drag the line between two handles), rotate and move; Shift and Alt as you'd expect. Drag the white circle to move the transformation point, double-click it to centre it; a rotated instance's box turns with it. |
 | Gradient Transform | **F** | Its own button (no flyouts yet). Gradient and bitmap fills, with Lock Fill. |
 | Width | **U** | Variable-width strokes, with profiles in Properties. |
 | Bone | **M** | Joins symbol instances into an armature, or draws bones inside a shape. |
@@ -164,8 +164,9 @@ uses them opens without that motion, and the import report says so. See [Tweens]
 
 Graphic, movie clip and button symbols behave as you expect: graphics keep step with their parent
 timeline, movie clips play their own, and buttons have Up, Over, Down and Hit frames. Double-click
-an instance (or press **Ctrl+E**) to edit it in place. Not yet: shared libraries and importing
-Library items from another document. See [Symbols and the Library](symbols-and-library.md).
+an instance (or press **Ctrl+E**) to edit it in place. Paste an instance into another open
+document and its symbols come along, renamed if a name is taken. Not yet: shared libraries and
+dragging items from another document's Library. See [Symbols and the Library](symbols-and-library.md).
 
 ### ActionScript
 

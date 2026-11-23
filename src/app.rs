@@ -134,19 +134,19 @@ impl Tool {
     pub fn hint(self) -> &'static str {
         match self {
             Tool::Select => tr_noop!("Click to select, drag to move, drag on empty space to marquee-select. Shift adds to the selection."),
-            Tool::Subselect => tr_noop!("Click a shape to show its points; on a merged drawing, the points of everything connected to it. Drag points or handles to reshape (a shared point moves every shape that has it; a smooth point's handles stay in line, Alt moves one alone); drag a line or fill to move everything connected. Shift adds to the point selection, drag on empty space to marquee points, arrow keys nudge them. Double-click an edge to add a point, Delete removes points, and right-click makes a point smooth or a corner. A motion path's points edit the same way (its ends stay)."),
-            Tool::Pen => tr_noop!("Click to place corner points, drag to pull smooth handles (Alt moves one handle). Click the first point to close; Enter, Esc or a click on the last point finishes. Backspace removes the last point. Alt-click a selected shape, a merged drawing's line or a motion path to add a point to it. Points snap to points and lines while Snap to Objects is on."),
+            Tool::Subselect => tr_noop!("Click a shape to show its points; on a merged drawing, the points of everything connected to it. Drag points or handles to reshape (a shared point moves every shape that has it; a smooth point's handles stay in line, Alt moves one alone); drag a line or fill to move everything connected. Shift adds to the point selection, drag on empty space to marquee points, arrow keys nudge them. Double-click an edge to add a point, Delete removes points, and right-click makes a point smooth or a corner. A motion path's points edit the same way (its ends stay), and so does the path of text on a path (the text follows)."),
+            Tool::Pen => tr_noop!("Click to place corner points, drag to pull smooth handles (Alt moves one handle, Shift keeps 45° steps). Click the first point to close; Enter, Esc or a double-click finishes. Click the last point to make it a corner, drag from it for a new handle, Alt-drag it to draw its curve again; Backspace removes it. On a selected path: click a point to make it a corner and again to delete it, click the outline to add a point, click an open end to continue it. Ctrl-click a path to select it. Points snap to points and lines while Snap to Objects is on."),
             Tool::Text => tr_noop!("Click to type new text, or click text to edit it. Esc or a click elsewhere finishes. The options set the font, size and colour; double-click text with the Selection tool to edit it too."),
             Tool::Pencil => tr_noop!("Drag to draw freehand. The options bar sets Smooth, Straighten or Ink."),
             Tool::Brush => tr_noop!("Drag to paint filled shapes in the fill colour (a click paints a dab). [ and ] change the size; the options set the brush, its shape, pressure, smoothing and paint mode."),
             Tool::PaintBrush => tr_noop!("Drag to draw a line in the stroke colour whose width follows the pen's pressure and the brush's tapers. Shape it afterwards with the Width tool. [ and ] change the size; the options set the brush and its pressure curve."),
             Tool::Eraser => tr_noop!("Drag to erase lines and fills drawn with Object Drawing off (drawing objects and symbols are kept). [ and ] change the size; the options set the shape and erase mode, and the Faucet deletes a whole fill or line with a click. Double-click the tool to erase everything on the stage."),
             Tool::Width => tr_noop!("Hover a stroke to see its width points. Drag a point's handle to widen or narrow the stroke there (Alt: one side only), drag its dot to slide it along, or drag anywhere on the stroke to add a point. Click a point and press Delete to remove it."),
-            Tool::Bone => tr_noop!("Drag from one symbol instance to another to join them with a bone (they move to an armature layer), or drag inside a shape to draw a bone in it (the shape bends with its bones); start on a bone's end to continue the chain. Click a bone to select it. Pose the armature by dragging bones or instances with the Selection tool."),
+            Tool::Bone => tr_noop!("Drag from one symbol instance to another to join them with a bone (they move to an armature layer), or drag inside a shape to draw a bone in it (the shape bends with its bones); start on a bone's end to continue the chain. Instances and shapes mix: from a shape's bone end, release over an instance to carry it; from an instance, release over a shape, then draw bones inside it from that bone's end. Click a bone to select it. Pose the armature by dragging bones or instances with the Selection tool."),
             Tool::Bind => tr_noop!("Shows the points of shapes with bones: a square follows one bone, a triangle several. Click a bone to see the points it moves (filled). Click a point, or drag a box around points, to make them follow only that bone; Shift shares the bone with the ones they follow, Ctrl takes them from it. Turn on Paint Weights in Properties to brush the bone's influence on, off or smooth, shown as a heat map."),
             Tool::Warp => tr_noop!("Click a shape or a bitmap to pin it (the first pin covers it with a warp mesh). Drag a pin to bend the artwork around the other pins; with one pin it moves. Click a pin and press Delete to remove it. A pin moved at another frame keys it, and pins tween."),
             Tool::GradientTransform => tr_noop!("Click a shape with a gradient or bitmap fill to show its handles. Drag the centre to move the fill, the square to change its width, the circle to change its size, the knob to rotate it (Shift: 15° steps) and, on a radial gradient, the triangle to move its focal point. A bitmap fill also has a square for its height and diamonds to skew it. Each drag is one undo step."),
-            Tool::Transform => tr_noop!("Drag a corner or edge to scale (Shift keeps proportions, Alt scales from the centre), just outside a corner to rotate (Shift snaps 15°), inside to move."),
+            Tool::Transform => tr_noop!("Drag a handle to scale (Shift keeps proportions, Alt scales from the centre), a line between handles to skew (Alt skews about the centre), just outside a corner to rotate (Shift snaps 15°), inside to move."),
             Tool::Rect => tr_noop!("Drag to draw a rectangle. Shift draws a square."),
             Tool::Oval => tr_noop!("Drag to draw an oval. Shift draws a circle."),
             Tool::Star => tr_noop!("Drag from the centre to draw a star or a polygon (Shape in the options)."),
@@ -168,9 +168,21 @@ pub struct TextEditing {
     /// The text element being edited, or `None` for new text.
     pub element: Option<anicraft_engine::doc::ElementId>,
     pub text: String,
-    /// The text when editing started (unchanged text commits nothing).
+    /// The text when editing started, or when its styles were last applied (unchanged text
+    /// commits nothing).
     pub original: String,
-    /// Focus the field on its first frame.
+    /// The text as the runs last saw it (a change since is followed by [`TextEditing::sync`]).
+    pub last: String,
+    /// Its styled runs and one style per paragraph (ADR 0085).
+    pub runs: Vec<anicraft_engine::doc::TextRun>,
+    pub paras: Vec<anicraft_engine::doc::ParagraphStyle>,
+    /// The selected characters (anchor, caret), as the editor last reported them.
+    pub sel: (u32, u32),
+    /// A style picked at a caret, for what is typed there next.
+    pub pending: Option<anicraft_engine::doc::CharStyle>,
+    /// Styled text being pasted this frame (copied from this editor).
+    pub paste: Option<crate::rich_edit::StyledClip>,
+    /// Focus the field on its next frame.
     pub focus: bool,
 }
 
@@ -253,8 +265,9 @@ pub enum Drag {
     CameraRotate { last: f32 },
     CameraWheel { until: f64 },
     /// Bone tool (ADR 0043): drawing a bone from instance `from` (or inside shape `from`, or on
-    /// from a shape bone's joint node, ADR 0071), joint `head` to `cur` (stage).
-    Bone { from: anicraft_engine::doc::ElementId, head: egui::Pos2, cur: egui::Pos2 },
+    /// from a shape bone's joint node, ADR 0071), joint `head` to `cur` (stage). `parent`: the
+    /// bone whose end the drag began on (ADR 0098).
+    Bone { from: anicraft_engine::doc::ElementId, parent: Option<anicraft_engine::doc::BoneId>, head: egui::Pos2, cur: egui::Pos2 },
     /// Bind tool (ADR 0071): a box from `start` to `cur` (stage) binding the points inside it.
     BindMarquee { start: egui::Pos2, cur: egui::Pos2 },
     /// Bind tool, Paint Weights (ADR 0090): a brush stroke whose last dab was at `last` (stage).
@@ -277,9 +290,14 @@ pub enum Drag {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum XfKind {
     Move,
+    /// Dragging the transformation point itself (ADR 0111): nothing is transformed.
+    Pivot,
     /// Handle position: -1/0/1 on each axis (corner, edge or centre).
     Scale { hx: i8, hy: i8 },
     Rotate,
+    /// Dragging the line between two handles shears along that edge (the sign is which edge:
+    /// `hx` is -1/1 on the left/right edge, `hy` is -1/1 on the top/bottom, the other is 0).
+    Skew { hx: i8, hy: i8 },
 }
 
 /// A small text prompt standing in for native file dialogs (M0).
@@ -337,6 +355,9 @@ impl PolyStarOptions {
 pub struct App {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) updates: crate::updates::Updates,
+    /// The live control port, with `--control` (ADR 0104).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) remote: Option<crate::remote::Remote>,
     pub s: Session,
     pub tool: Tool,
     pub view: StageView,
@@ -368,6 +389,22 @@ pub struct App {
     /// Open this layer's colour popup on the next frame (screenshots, the audit).
     pub tl_color_open: Option<anicraft_engine::doc::LayerId>,
     pub convert_last: crate::convert_symbol::Last,
+    /// Expand Fill or Soften Fill Edges while its dialog is open, and what each was last given
+    /// (ADR 0109).
+    pub shape_dialog: Option<crate::shape_dialogs::ShapeDialog>,
+    pub shape_last: crate::shape_dialogs::Last,
+    pub trace: Option<crate::trace_dialog::TraceDialog>,
+    /// Modify › Document Settings (#505): the dialog while it is open.
+    pub doc_settings: Option<crate::doc_settings::DocSettings>,
+    pub trace_last: anicraft_engine::trace::TraceSettings,
+    /// Convert Audio to Keyframes and Auto Lip-Sync (ADR 0114): the dialog while it is open
+    /// (its preview is a gesture it keeps open until OK or Cancel), and what it was last given.
+    pub audio_keys: Option<crate::audio_keys::Dialog>,
+    pub audio_keys_last: crate::audio_keys::Settings,
+    /// The data table the table viewer shows, while it is open (ADR 0118).
+    pub data_view: Option<anicraft_engine::doc::DataId>,
+    /// Import Again: the table the next Import Data Table replaces.
+    pub data_reimport: Option<anicraft_engine::doc::DataId>,
     pub show_about: bool,
     pub show_files: bool,
     pub show_licenses: bool,
@@ -389,6 +426,11 @@ pub struct App {
     pub library: crate::library::LibraryView,
     /// Text being typed on the stage.
     pub text_edit: Option<TextEditing>,
+    /// Styled text last copied from the stage editor (ADR 0085).
+    pub text_clip: Option<crate::rich_edit::StyledClip>,
+    /// Where Properties showed the styles of the text being typed (last frame): a click there
+    /// keeps the editor open.
+    pub text_props_rect: Option<egui::Rect>,
     /// Attach to Path is waiting for a click on a shape (ADR 0070): the text to set along it.
     pub path_pick: Option<anicraft_engine::doc::ElementId>,
     /// Font families on this computer, listed once on first need.
@@ -451,6 +493,15 @@ pub struct App {
     pub width_sel: Option<(anicraft_engine::doc::ElementId, usize)>,
     /// Opens the Tools bar's fill swatch picker on the next frame (the `swatches` screenshot).
     pub open_fill_swatch: bool,
+    /// The Properties panel's Scale lock (#304; view state, not undoable): while on, editing
+    /// one Scale axis adjusts the other so the selection keeps its width:height proportion.
+    pub scale_lock: bool,
+    /// Free Transform's own state (ADR 0111; view state): the transformation point held for a
+    /// selection that can't keep one, and the box a drag began with.
+    pub xf: crate::xform::State,
+    /// The zoom edit-bar field's draft while it has the keyboard (view state, not undoable):
+    /// `None` shows the current zoom, `Some` is what is being typed.
+    pub zoom_text: Option<String>,
     /// The bone picked on the stage (ADR 0043; view state).
     pub bone_sel: Option<anicraft_engine::doc::BoneId>,
     /// The Bind tool's options: Paint Weights, the brush, the focused point (ADR 0090).
@@ -464,10 +515,21 @@ pub struct App {
     /// Selected frames on the timeline, and the drag on the frame grid.
     pub frame_sel: Option<timeline::FrameSel>,
     pub tl_drag: timeline::TlDrag,
+    /// The layer being dragged by its name to another place in the stack (#407).
+    pub tl_layer_drag: Option<anicraft_engine::doc::LayerId>,
+    /// The layer whose dot is being dragged to its new parent layer in the parenting view
+    /// (ADR 0113), and where the dots were drawn this frame.
+    pub tl_parent_drag: Option<anicraft_engine::doc::LayerId>,
+    pub tl_parent_dots: Vec<crate::parenting::Dot>,
+    /// The layer column's width while its edge is dragged (#384); the preference takes it on
+    /// release.
+    pub tl_layer_w_drag: Option<f32>,
     /// Where the panels are (ADR 0075): the current workspace's arrangement.
     pub dock: crate::dock::Layout,
     /// The dock's view state: a tab being dragged, where groups were drawn.
     pub dock_view: crate::dock_ui::DockView,
+    /// Window › Hide Panels (F4): the arrangement to bring back, while every panel is hidden.
+    pub hidden_panels: Option<crate::dock::Layout>,
     /// Window › Workspace › Manage Workspaces… (ADR 0087).
     pub manage_workspaces: crate::workspaces_window::Manage,
     /// The Motion Editor's view state: the property whose curve it shows, the picked key
@@ -485,6 +547,9 @@ pub struct App {
     pub me_vscroll: f32,
     /// Colour effect styles the Motion Editor lists besides those the tween uses (ADR 0056).
     pub me_styles: Vec<anicraft_engine::doc::ColorStyle>,
+    /// The filter colours whose channels the Motion Editor lists (ADR 0099): filter slot and
+    /// colour. View state; it starts afresh on another span.
+    pub me_open: Vec<(u8, anicraft_engine::doc::FilterColor)>,
     /// The frame grid was clicked more recently than the stage: Ctrl+X/C/V act on frames.
     pub timeline_focus: bool,
     /// A destructive command waiting for the user's decision (ADR 0004).
@@ -508,6 +573,12 @@ pub struct App {
     pub find: crate::find_panel::FindState,
     /// File › Publish Settings and the publish running or last run (ADR 0060).
     pub publish: crate::publish_panel::PublishState,
+    /// File › Import › Import Video while its window is open (ADR 0116).
+    pub video_import: Option<crate::video_import::VideoImport>,
+    /// The reference videos' pictures for the stage: decoded on demand, within a memory budget.
+    pub video: anicraft_engine::video::Cache,
+    /// Why a reference video can't be shown, as last said in the status bar (said once).
+    pub video_failed: Option<String>,
     /// Window › Movie Explorer, the Library dock's other tab (ADR 0058).
     pub explorer: crate::movie_explorer::ExplorerView,
     pub actions: crate::actions_panel::State,
@@ -518,11 +589,17 @@ pub struct App {
     /// The Custom Ease window (ADR 0081), when open.
     pub ease: Option<crate::ease_editor::EaseEditor>,
     pub show_shortcuts: bool,
-    /// The window close was intercepted because of unsaved changes.
-    pub close_dialog: bool,
+    /// The open documents (ADR 0112): the one being edited is `s`, the others wait in their
+    /// tabs. Closing one, or the window, with unsaved changes asks first (`tabs::CloseFlow`).
+    pub tabs: crate::tabs::Tabs,
+    /// The window may close: every document's unsaved changes were saved or given up.
     pub allow_close: bool,
-    /// Close the window once the pending Save As succeeds.
-    pub close_after_save: bool,
+    /// The file dialog a command asked for (command, parameter, title, file name), shown at the
+    /// end of the frame, and the open dialog's answer to come.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) file_request: Option<(&'static str, &'static str, String, String)>,
+    #[cfg(not(target_arch = "wasm32"))]
+    file_dialog: Option<(&'static str, &'static str, platform::FileAnswer)>,
     pub prefs: prefs::Prefs,
     pub show_prefs: bool,
     /// This copy as an AppImage, and its applications menu entry (ADR 0094); `None` elsewhere.
@@ -531,11 +608,20 @@ pub struct App {
     pub prefs_to_about: bool,
     /// Installed fonts, scanned off the UI thread on first need.
     pub system_fonts: Option<std::sync::Arc<prefs::SystemFonts>>,
+    /// Faces of this computer for scripts the interface's fonts lack (#482).
+    pub font_fallback: crate::font_fallback::Fallback,
     fonts_rx: Option<std::sync::mpsc::Receiver<prefs::SystemFonts>>,
     /// Re-check which glyphs the active fonts have (after fonts change).
     glyph_check: bool,
+    /// A copy or cut ran: the system clipboard gets a note at the end of the frame, so the next
+    /// Ctrl/⌘+V reaches the app (egui-winit sends a paste only when the clipboard holds text).
+    copied: bool,
+    /// Paste looks at the system clipboard for a picture from another app (#263). Off in
+    /// screenshot runs and tests, which must not depend on what this computer last copied.
+    system_clipboard: bool,
+    swallowed_paste: platform::SwallowedPaste,
     /// Document revision at the end of the last frame (edits schedule a repaint).
-    last_revision: u64,
+    pub(crate) last_revision: u64,
     title: String,
     /// Keyboard shortcuts in effect (defaults plus the user's changes) and their lookup table.
     pub keymap: keymap::Keymap,
@@ -549,7 +635,7 @@ pub struct App {
     /// Playback follows the sound's clock (the movie has sounds and the device plays them).
     audio_clock: bool,
     /// The scene and frame last heard, so a moved playhead plays a snippet (scrubbing).
-    heard: Option<(usize, u32)>,
+    pub(crate) heard: Option<(usize, u32)>,
     /// The panel Ctrl+F6 last moved focus to (where the next press continues from).
     pub last_panel: Option<crate::a11y::Region>,
     /// The stage's elements as keyboard stops and screen-reader nodes (ADR 0064).
@@ -564,6 +650,13 @@ pub struct App {
     /// `None` until it has, or if it can't. Screenshot runs never ask, so they look the same
     /// everywhere.
     pub system_look: platform::SystemLook,
+    /// Your own themes (ADR 0117), as last read from `themes_dir`: at start, and on Reload.
+    pub themes: crate::theme_file::Library,
+    /// The themes folder. None in a browser, and in tests and screenshot runs unless one is
+    /// named (`ANICRAFT_THEMES_DIR`, `--theme <file>`), so they look the same everywhere.
+    pub themes_dir: Option<PathBuf>,
+    /// The theme of your own that couldn't be used was said once (not on every repaint).
+    theme_missing_said: Option<String>,
     /// Keys to press, a few frames apart (screenshots of keyboard states).
     pub key_script: std::collections::VecDeque<(Key, Modifiers)>,
     /// Screenshots only: the ease menu (by its id salt) to show open on the next frame.
@@ -609,10 +702,31 @@ pub const VIEW_SHORTCUTS: &[(&str, &str)] = &[
     ("F3", "view.find_next"),
     ("Shift+F3", "view.find_prev"),
     ("Alt+F3", "view.movie_explorer"),
+    // Window › each panel, open and closed from the keyboard with Animate's keys (#456), and F4
+    // for all of them at once. (Animate's Align key, Ctrl+K, is the command palette here: Align,
+    // Layer Depth and the Motion Editor take a key in the shortcut editor, `VIEW_UNBOUND`.)
+    ("Ctrl+Alt+T", "view.panel.timeline"),
+    ("Ctrl+F2", "view.panel.tools"),
+    ("Ctrl+F3", "view.panel.properties"),
+    ("Ctrl+L", "view.panel.library"),
+    ("F2", "view.panel.output"),
+    ("Ctrl+Shift+F9", "view.panel.colour"),
+    ("Ctrl+F9", "view.panel.swatches"),
+    ("Ctrl+F10", "view.panel.history"),
+    ("F4", "view.hide_panels"),
+    // The open documents (ADR 0112): Close and Close All as in Animate, and the tab keys of
+    // browsers (Ctrl+Tab and Ctrl+Shift+Tab work too).
+    ("Ctrl+W", "view.close_document"),
+    ("Ctrl+Alt+W", "view.close_all_documents"),
+    ("Ctrl+PageDown", "view.next_document"),
+    ("Ctrl+PageUp", "view.prev_document"),
     // Brush size, as in paint programs.
     ("[", "view.brush_smaller"),
     ("]", "view.brush_larger"),
 ];
+
+/// View actions without a default key: they can be given one in the shortcut editor.
+pub const VIEW_UNBOUND: &[&str] = &["view.panel.align", "view.panel.layer_depth", "view.panel.motion_editor"];
 
 impl App {
     /// Show the last update's result once the native window begins drawing.
@@ -624,6 +738,8 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, session: Session, shot: Option<PathBuf>) -> App {
         #[cfg_attr(not(gpu_stage), allow(unused_mut))]
         let mut app = App::with_context(&cc.egui_ctx, session, shot);
+        // Names in scripts the bundled fonts lack get a face of this computer (#482).
+        app.font_fallback.enabled = true;
         // The GPU stage shares the window's device when it runs on wgpu (ADR 0029).
         #[cfg(gpu_stage)]
         app.stage_cache.gpu.set_window_device(cc.wgpu_render_state.as_ref());
@@ -639,6 +755,7 @@ impl App {
     /// The app on an egui context (the window's, or a headless one in tests).
     pub fn with_context(ctx: &egui::Context, session: Session, shot: Option<PathBuf>) -> App {
         theme::apply(ctx);
+        platform::pointer_feel(ctx);
         let shot_mode = shot.is_some();
         // Screenshot runs use defaults so automated checks are reproducible.
         let prefs = if shot_mode { prefs::Prefs::default() } else { prefs::Prefs::load() };
@@ -655,10 +772,13 @@ impl App {
             let _ = anicraft_engine::text::Fonts::get();
         });
         let mut session = session;
+        // The sample or a blank page gives way to the first document opened (ADR 0112).
+        let placeholder = session.path.is_none() && !session.is_dirty();
         // Open Recent is the session's list, kept in the preferences (ADR 0059).
         session.recent = prefs.recent.clone();
         session.brushes = prefs.brushes.clone();
         session.filter_presets = prefs.filter_presets.clone();
+        session.filter_presets.restore_hidden(&prefs.filter_presets_hidden);
         // Whether rulers, grid and guides show and snap carries over between sessions (ADR 0076).
         session.aids = prefs.aids;
         // The editor draws as Animate does: merge drawing, until Object Drawing (J) is switched on.
@@ -666,6 +786,8 @@ impl App {
         let mut app = App {
             #[cfg(not(target_arch = "wasm32"))]
             updates: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            remote: None,
             s: session,
             tool: Tool::Select,
             view: StageView { zoom: 1.0, pan: egui::Vec2::ZERO, fit: true, fitted: None, clip_to_stage: false },
@@ -687,6 +809,15 @@ impl App {
             tl_header_spill: 0.0,
             tl_color_open: None,
             convert_last: Default::default(),
+            shape_dialog: None,
+            trace: None,
+            doc_settings: None,
+            trace_last: Default::default(),
+            audio_keys: None,
+            data_view: None,
+            data_reimport: None,
+            audio_keys_last: crate::audio_keys::Settings::default(),
+            shape_last: Default::default(),
             show_about: false,
             show_files: false,
             show_licenses: false,
@@ -701,6 +832,8 @@ impl App {
             library_sel,
             library: Default::default(),
             text_edit: None,
+            text_clip: None,
+            text_props_rect: None,
             path_pick: None,
             font_families: None,
             polystar: PolyStarOptions::default(),
@@ -733,6 +866,9 @@ impl App {
             points: Vec::new(),
             width_sel: None,
             open_fill_swatch: false,
+            scale_lock: false,
+            xf: crate::xform::State::default(),
+            zoom_text: None,
             bone_sel: None,
             bind: crate::bind_tool::BindOptions::default(),
             warp_pin: None,
@@ -740,6 +876,10 @@ impl App {
             motion_drag: None,
             frame_sel: None,
             tl_drag: timeline::TlDrag::None,
+            tl_layer_drag: None,
+            tl_parent_drag: None,
+            tl_parent_dots: Vec::new(),
+            tl_layer_w_drag: None,
             dock: prefs.workspaces.layout(),
             dock_view: Default::default(),
             manage_workspaces: Default::default(),
@@ -751,6 +891,7 @@ impl App {
             me_drag: None,
             me_vscroll: 0.0,
             me_styles: Vec::new(),
+            me_open: Vec::new(),
             timeline_focus: false,
             confirm: None,
             skip_confirm: HashSet::new(),
@@ -763,22 +904,32 @@ impl App {
             output_log: Vec::new(),
             find: Default::default(),
             publish: Default::default(),
+            video_import: None,
+            video: Default::default(),
+            video_failed: None,
             explorer: Default::default(),
             actions: crate::actions_panel::State::default(),
             test_movie: None,
             envelope: None,
             ease: None,
             show_shortcuts: false,
-            close_dialog: false,
+            tabs: crate::tabs::Tabs::new(placeholder),
             allow_close: false,
-            close_after_save: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            file_request: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            file_dialog: None,
             prefs,
             show_prefs: false,
             desktop: None,
             prefs_to_about: false,
             system_fonts: None,
+            font_fallback: Default::default(),
             fonts_rx: None,
             glyph_check: true,
+            copied: false,
+            system_clipboard: !shot_mode && !platform::WEB,
+            swallowed_paste: platform::SwallowedPaste::default(),
             last_revision: 0,
             title: String::new(),
             keymap,
@@ -793,7 +944,11 @@ impl App {
             tl_heard: None,
             tl_refocus: false,
             menu_keys: Default::default(),
+            hidden_panels: None,
             system_look: platform::SystemLook::default(),
+            themes: Default::default(),
+            themes_dir: None,
+            theme_missing_said: None,
             key_script: Default::default(),
             shot_ease_menu: std::cell::Cell::new(None),
             shot_click: std::cell::Cell::new(None),
@@ -807,7 +962,17 @@ impl App {
             templates: Default::default(),
             macros: Default::default(),
         };
+        // Your themes (ADR 0117), before the look is first applied. Tests and screenshot runs
+        // read no folder of the computer's unless one is named.
+        let named = std::env::var_os("ANICRAFT_THEMES_DIR").is_some_and(|v| !v.is_empty());
+        if named || (!cfg!(test) && app.shot.is_none()) {
+            app.themes_dir = platform::themes_dir();
+        }
+        if let Some(dir) = &app.themes_dir {
+            app.themes = crate::theme_file::Library::scan(dir);
+        }
         app.apply_prefs(ctx);
+        crate::brushtool::restore(&mut app);
         app.decode_sounds();
         app.status_ok(tr!("Welcome to AniCraft. Press Enter to play the sample animation."));
         if let Some(e) = recovery_err {
@@ -821,11 +986,15 @@ impl App {
     }
 
     /// View › Preview Through Camera (ADR 0027). With no camera yet there is nothing to look
-    /// through, so it says how to add one.
+    /// through, so it says how to add one; when the camera layer is hidden, it reminds to show it.
     pub fn toggle_camera_preview(&mut self) {
         self.camera_preview = !self.camera_preview;
-        if self.camera_preview && self.s.timeline().camera_layer().is_none() {
-            self.status_ok(tr!("Preview through camera is on; add a camera (the camera button on the timeline, or the Camera tool) to look through it."));
+        if self.camera_preview {
+            if self.s.timeline().camera_layer().is_none() {
+                self.status_ok(tr!("Preview through camera is on; add a camera (the camera button on the timeline, or the Camera tool) to look through it."));
+            } else if self.s.timeline().camera_layer().is_some_and(|l| !l.visible) {
+                self.status_ok(tr!("Preview through camera is on, but the camera layer is hidden. Show the layer to look through it."));
+            }
         }
     }
 
@@ -843,11 +1012,12 @@ impl App {
     }
 
     /// Runs an engine command, reporting failures in the status bar.
-    /// After a move, selected raw shapes merge where they land (ADR 0031).
+    /// After a move, selected raw shapes float over what they landed on, and merge with it when
+    /// they are deselected, as in Animate (ADR 0122, #487): until then they can be moved on.
     pub fn drop_raw(&mut self) {
         let raw = self.s.selected_elements().iter().any(|(_, e)| matches!(&e.kind, anicraft_engine::doc::ElementKind::Shape(sh) if sh.merge));
         if raw {
-            self.run("draw.drop", json!({}));
+            self.run("draw.float", json!({}));
         }
     }
 
@@ -868,7 +1038,12 @@ impl App {
             platform::deliver(anicraft_engine::vfs::take_written());
         }
         match result {
-            Ok(v) => Some(v),
+            Ok(v) => {
+                if matches!(id, "edit.copy" | "edit.cut" | "timeline.copy_frames" | "timeline.cut_frames" | "frames.copy" | "frames.cut") {
+                    self.copied = true;
+                }
+                Some(v)
+            }
             Err(e) => {
                 // The engine's English, translated when a catalog has that exact message.
                 self.status_err(crate::i18n::t_dyn(&e.to_string()).into_owned());
@@ -909,8 +1084,7 @@ impl App {
         crate::i18n::set_language(&self.prefs.language);
         ctx.request_repaint();
         ctx.set_zoom_factor(self.prefs.ui_scale);
-        theme::apply_palette(ctx, self.prefs.palette(self.system_look));
-        crate::onion::refresh_colors(self);
+        self.apply_theme(ctx);
         self.refresh_keymap();
         let wants_system = [&self.prefs.ui_font, &self.prefs.data_font].iter().any(|f| matches!(f, prefs::FontChoice::System(_)));
         if wants_system && self.system_fonts.is_none() {
@@ -937,19 +1111,121 @@ impl App {
                 self.status_err(tr!("Font “{name}” is not installed; using the bundled font", name = name));
             }
         }
-        theme::install_fonts(ctx, ui_font.as_ref(), data_font.as_ref());
+        theme::install_fonts(ctx, ui_font.as_ref(), data_font.as_ref(), &self.font_fallback.faces);
         self.glyph_check = true;
     }
 
-    /// `--theme` / `--scale`: a palette and interface scale for this run only (clamped like the
-    /// preference), not saved.
-    pub fn preview_look(&mut self, ctx: &egui::Context, theme: Option<theme::Palette>, scale: Option<f32>) {
-        if theme.is_none() && scale.is_none() {
+    /// The look the preferences ask for, drawn from now on: a theme of your own (ADR 0117) when
+    /// one is chosen and its file passes its checks, else the built-in palette (the one that
+    /// theme is based on, if it can't be used: said once, never applied in part).
+    pub fn apply_theme(&mut self, ctx: &egui::Context) {
+        let palette = self.prefs.palette(self.system_look);
+        let chosen = self.prefs.user_theme().map(str::to_string);
+        match chosen.as_deref().map(|id| (id, self.themes.get(id).map(|e| e.theme.clone()))) {
+            Some((_, Some(Ok(t)))) => {
+                self.theme_missing_said = None;
+                theme::apply_user_theme(ctx, t.base, t.tokens);
+            }
+            Some((id, other)) => {
+                theme::apply_palette(ctx, palette);
+                if self.theme_missing_said.as_deref() != Some(id) {
+                    self.theme_missing_said = Some(id.to_string());
+                    let shown = crate::i18n::t(theme::Palette::ALL.iter().find(|(p, _, _)| *p == palette).map_or("", |(_, name, _)| name));
+                    match other {
+                        Some(Err(why)) => self.status_err(tr!("The theme “{name}” is not used: {why} Showing {palette}.", name = id, why = why.message(), palette = shown)),
+                        _ => self.status_err(tr!("The theme “{name}” is not in the themes folder. Showing {palette}.", name = id, palette = shown)),
+                    }
+                }
+            }
+            None => {
+                self.theme_missing_said = None;
+                theme::apply_palette(ctx, palette);
+            }
+        }
+        crate::onion::refresh_colors(self);
+        ctx.request_repaint();
+    }
+
+    /// Preferences › Theme › Reload: reads the themes folder again and redraws with what it
+    /// holds now, in the same frame.
+    pub fn reload_themes(&mut self, ctx: &egui::Context) {
+        let Some(dir) = self.themes_dir.clone() else {
+            self.status_err(tr!("This copy of AniCraft has no themes folder"));
+            return;
+        };
+        self.themes = crate::theme_file::Library::scan(&dir);
+        self.theme_missing_said = None;
+        self.apply_theme(ctx);
+        // What went wrong with the theme in use, if anything did, is the message that matters.
+        if self.theme_missing_said.is_some() {
+            return;
+        }
+        let (good, refused) = self.themes.counts();
+        if refused > 0 {
+            self.status_err(trn!("{n} theme read; {refused} refused (see Preferences › Theme)", "{n} themes read; {refused} refused (see Preferences › Theme)", good, refused = refused));
+        } else {
+            self.status_ok(trn!("{n} theme read from the themes folder", "{n} themes read from the themes folder", good));
+        }
+    }
+
+    /// Preferences › Theme › Open Folder: the themes folder in the file manager, made if it
+    /// isn't there yet.
+    pub fn open_themes_folder(&mut self) {
+        let Some(dir) = self.themes_dir.clone() else {
+            self.status_err(tr!("This copy of AniCraft has no themes folder"));
+            return;
+        };
+        match std::fs::create_dir_all(&dir).map_err(|e| e.to_string()).and_then(|()| platform::open_folder(&dir)) {
+            Ok(()) => self.status_ok(tr!("Opened the themes folder: {path}", path = dir.display())),
+            Err(e) => self.status_err(tr!("Could not open the themes folder: {e}", e = e)),
+        }
+    }
+
+    /// Preferences › Theme › Export Current Theme: the look in use, every colour role of it,
+    /// written to the themes folder as a file to start a theme from. It is listed at once.
+    pub fn export_theme(&mut self, ctx: &egui::Context) {
+        let Some(dir) = self.themes_dir.clone() else {
+            self.status_err(tr!("This copy of AniCraft has no themes folder"));
+            return;
+        };
+        let base = theme::palette();
+        let current = match self.prefs.user_theme().and_then(|id| self.themes.get(id)).filter(|_| theme::user_theme_active()) {
+            Some(mine) => mine.name().to_string(),
+            None => crate::i18n::t(theme::Palette::ALL.iter().find(|(p, _, _)| *p == base).map_or("", |(_, name, _)| name)).to_string(),
+        };
+        let text = crate::theme_file::export(&tr!("Copy of {name}", name = current), base, &T);
+        let written = std::fs::create_dir_all(&dir).map_err(|e| e.to_string()).and_then(|()| {
+            let path = crate::theme_file::free_path(&dir, "my-theme").ok_or_else(|| tr!("the themes folder is full of exported themes").to_string())?;
+            std::fs::write(&path, text).map(|()| path).map_err(|e| e.to_string())
+        });
+        match written {
+            Ok(path) => {
+                self.themes = crate::theme_file::Library::scan(&dir);
+                self.apply_theme(ctx);
+                self.status_ok(tr!("Exported the theme to {path}: edit its colours, then Reload", path = path.display()));
+            }
+            Err(e) => self.status_err(tr!("Could not export the theme: {e}", e = e)),
+        }
+    }
+
+    /// `--theme` / `--scale`: a palette (or a theme file) and interface scale for this run only
+    /// (clamped like the preference), not saved.
+    pub fn preview_look(&mut self, ctx: &egui::Context, theme: Option<theme::Palette>, theme_file: Option<&std::path::Path>, scale: Option<f32>) {
+        if theme.is_none() && theme_file.is_none() && scale.is_none() {
             return;
         }
         let mut p = self.prefs.clone();
         if let Some(t) = theme {
             p.theme = t;
+            p.theme_file = None;
+            p.theme_follows_system = Some(false);
+        }
+        if let Some(file) = theme_file {
+            // The file's folder is the themes folder for this run.
+            self.themes_dir = file.parent().map(|d| if d.as_os_str().is_empty() { PathBuf::from(".") } else { d.to_path_buf() });
+            self.themes = self.themes_dir.as_deref().map(crate::theme_file::Library::scan).unwrap_or_default();
+            p.theme_file = file.file_stem().map(|s| s.to_string_lossy().into_owned());
+            p.theme = self.themes.get(p.theme_file.as_deref().unwrap_or("")).and_then(|e| e.theme.as_ref().ok()).map_or(theme::Palette::Graphite, |t| t.base);
             p.theme_follows_system = Some(false);
         }
         p.ui_scale = scale.unwrap_or(p.ui_scale);
@@ -1096,11 +1372,8 @@ impl App {
         }
         let before = self.prefs.palette(self.system_look);
         self.system_look = v;
-        let after = self.prefs.palette(v);
-        if after != before {
-            theme::apply_palette(ctx, after);
-            crate::onion::refresh_colors(self);
-            ctx.request_repaint();
+        if self.prefs.palette(v) != before {
+            self.apply_theme(ctx);
         }
     }
 
@@ -1131,6 +1404,47 @@ impl App {
         }
     }
 
+    /// A reference video under a tracing layer (ADR 0116), for screenshots: a two-second test
+    /// film made here with the ffmpeg on this computer, imported as a reference layer, with a
+    /// few traced strokes on the layer above; its first pictures are waited for (at most a few
+    /// seconds) so the stage shows them. Without ffmpeg the status bar says so.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_reference_video(&mut self) {
+        let clip = std::env::temp_dir().join("anicraft-reference-shot.mkv");
+        let made = std::process::Command::new(anicraft_engine::video::program(None))
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=duration=2:size=640x360:rate=24", "-c:v", "mpeg4", "-q:v", "3"])
+            .arg(&clip)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !made {
+            self.status_err(tr!("AniCraft reads video with ffmpeg, which is not on this computer: install it from ffmpeg.org."));
+            return;
+        }
+        self.perform_here("file.import_video", json!({"path": clip.display().to_string(), "mode": "reference"}));
+        // Traced over it, on the layer above: an outline in ink, as a rotoscoper draws.
+        self.run("layer.new", json!({"name": "Tracing"}));
+        let stage = self.s.doc.stage;
+        let (cx, cy) = (stage.width as f32 * 0.5, stage.height as f32 * 0.5);
+        let ring: Vec<[f32; 2]> = (0..=72).map(|i| (i as f32 * 5.0).to_radians()).map(|a| [cx + a.cos() * 118.0, cy + a.sin() * 118.0]).collect();
+        self.run("draw.freehand", json!({"points": ring, "stroke_width": 4, "stroke": "#ff3d7f"}));
+        let cross: Vec<[f32; 2]> = (0..=40).map(|i| [cx - 150.0 + i as f32 * 7.5, cy + (i as f32 * 0.3).sin() * 6.0]).collect();
+        self.run("draw.freehand", json!({"points": cross, "stroke_width": 4, "stroke": "#ff3d7f"}));
+        self.run("timeline.goto", json!({"frame": 6}));
+        self.s.mark_saved();
+        // The frame under the playhead, decoded before the picture is taken.
+        let doc = self.s.doc.clone();
+        let frame = self.s.doc.scene_start(self.s.scene) + self.s.frame;
+        let _ = anicraft_engine::video::shown(&self.video, &doc, frame, true);
+        self.video.wait_idle(std::time::Duration::from_secs(10));
+    }
+
+    /// A web page can't start ffmpeg (ADR 0036).
+    #[cfg(target_arch = "wasm32")]
+    fn open_reference_video(&mut self) {
+        self.status_err(crate::i18n::t(platform::unavailable("file.import_video").unwrap_or("")));
+    }
+
     /// `--open` at start-up: shows a panel, for visual checks and documentation screenshots.
     /// Imports a two-second beat made here (decaying 220 Hz pulses every half second) to the
     /// stage, for screenshots; whether it worked.
@@ -1145,6 +1459,45 @@ impl App {
             .collect();
         let path = std::env::temp_dir().join("anicraft-beat.wav");
         if std::fs::write(&path, anicraft_audio::wav::encode(rate, 1, &beat, anicraft_audio::wav::Bits::Int16)).is_err() {
+            return false;
+        }
+        self.perform("file.import", json!({"path": path.display().to_string()}));
+        true
+    }
+
+    /// A few made-up syllables, for screenshots of lip-sync: vowels as their first two
+    /// formants (ah, ee, oo, oh), short stops and a hum between them, two and a half seconds.
+    fn import_demo_speech(&mut self) -> bool {
+        let rate = 22_050u32;
+        // (seconds, first formant, second formant, the second's share; 0 Hz is silence)
+        let parts: [(f32, f32, f32, f32); 12] = [
+            (0.30, 0.0, 0.0, 0.0),
+            (0.26, 730.0, 1090.0, 0.5),
+            (0.07, 0.0, 0.0, 0.0),
+            (0.22, 270.0, 2290.0, 0.25),
+            (0.26, 300.0, 870.0, 0.3),
+            (0.22, 0.0, 0.0, 0.0),
+            (0.24, 570.0, 840.0, 0.5),
+            (0.07, 0.0, 0.0, 0.0),
+            (0.30, 730.0, 1090.0, 0.5),
+            (0.22, 530.0, 1840.0, 0.3),
+            (0.08, 0.0, 0.0, 0.0),
+            (0.26, 300.0, 870.0, 0.3),
+        ];
+        let mut speech: Vec<f32> = Vec::new();
+        for (seconds, f1, f2, share) in parts {
+            let n = (seconds * rate as f32) as usize;
+            for i in 0..n {
+                let t = i as f32 / rate as f32;
+                // Each syllable swells and falls away.
+                let swell = (std::f32::consts::PI * i as f32 / n as f32).sin().powf(0.6);
+                let voice = if f1 > 0.0 { 0.6 * (t * f1 * std::f32::consts::TAU).sin() + 0.6 * share * (t * f2 * std::f32::consts::TAU).sin() } else { 0.0 };
+                speech.push(swell * voice);
+            }
+        }
+        speech.extend(std::iter::repeat_n(0.0, (rate / 3) as usize));
+        let path = std::env::temp_dir().join("anicraft-hello.wav");
+        if std::fs::write(&path, anicraft_audio::wav::encode(rate, 1, &speech, anicraft_audio::wav::Bits::Int16)).is_err() {
             return false;
         }
         self.perform("file.import", json!({"path": path.display().to_string()}));
@@ -1221,6 +1574,7 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             Some("updates") => self.updates.request(),
             Some("files") => self.show_files = true,
+            Some("tabs") => crate::tabs::sample(self),
             Some("start") => {
                 // The start screen with sample recent files (one pinned, one missing).
                 crate::start::open(self);
@@ -1464,6 +1818,44 @@ impl App {
                 }
                 self.run("element.select", json!({"ids": ids}));
             }
+            // Modify › Document Settings (#505): its dialog over the sample.
+            Some("docsettings") => crate::doc_settings::open(self),
+            Some("tracebitmap") => {
+                // Trace Bitmap (#463): a small picture (sky, sun, hills) placed twice. The left
+                // one is traced with the defaults and shows as selected raw shapes; the right
+                // one is selected with the dialog open over it.
+                self.run("layer.new", json!({"name": "Picture"}));
+                let dir = std::env::temp_dir().join("anicraft-shot-trace");
+                let _ = std::fs::create_dir_all(&dir);
+                let (w, h) = (260u32, 180u32);
+                let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+                for y in 0..h {
+                    for x in 0..w {
+                        let (fx, fy) = (x as f32, y as f32);
+                        let hill = 120.0 + 22.0 * (fx * 0.035).sin();
+                        let far = 100.0 + 16.0 * (fx * 0.05 + 1.3).cos();
+                        let c = if fy > hill {
+                            [58, 140, 84, 255]
+                        } else if fy > far {
+                            [104, 176, 120, 255]
+                        } else if (fx - 190.0).powi(2) + (fy - 52.0).powi(2) < 30.0 * 30.0 {
+                            [250, 206, 84, 255]
+                        } else {
+                            [120, 178, 232, 255]
+                        };
+                        rgba.extend_from_slice(&c);
+                    }
+                }
+                let path = dir.join("hills.png");
+                let bitmap = anicraft_engine::render::encode_png(w, h, &rgba).ok().filter(|png| std::fs::write(&path, png).is_ok()).and_then(|_| self.run("file.import_to_library", json!({"path": path.display().to_string(), "name": "hills.png"}))).and_then(|v| v["bitmap"].as_u64());
+                if let Some(b) = bitmap {
+                    self.tool = Tool::Select;
+                    self.run("library.place", json!({"bitmap": b, "x": 420, "y": 300}));
+                    self.run("modify.trace_bitmap", json!({}));
+                    self.run("library.place", json!({"bitmap": b, "x": 800, "y": 300}));
+                    crate::trace_dialog::open(self);
+                }
+            }
             Some("warp") => {
                 // Asset Warp (ADR 0079): a checkered bitmap and a striped banner, each pinned at
                 // three points and bent at frame 1, bent the other way at frame 24 (a classic
@@ -1541,6 +1933,17 @@ impl App {
                 // Layer Properties (ADR 0061) on the active layer.
                 crate::layer_props::open(self, None);
             }
+            Some("videoimport") => {
+                // File › Import › Import Video (ADR 0116) with a film described: the two ways
+                // to take it, the options and what it will cost (no ffmpeg needed to show it).
+                let probe = anicraft_engine::video::Probe { width: 1920, height: 1080, duration: Some(8.0), fps: Some(29.97), audio: true };
+                crate::video_import::open_with(self, PathBuf::from("walk-cycle.mp4"), probe);
+                if let Some(d) = &mut self.video_import {
+                    d.mode = crate::video_import::Mode::Frames;
+                    d.step = 2;
+                }
+            }
+            Some("video") => self.open_reference_video(),
             Some("frameview") => self.tl_frame_view_open = true,
             Some("layercolour") => self.tl_color_open = Some(self.s.layer),
             Some("timelinepolish") => {
@@ -1723,7 +2126,52 @@ impl App {
                     crate::layer_props::open(self, Some(anicraft_engine::doc::LayerId(m)));
                 }
             }
-            Some(which @ ("textfields" | "testtext")) => {
+            Some("pathedit") => {
+                // Editing the path of text on a path in place, and lines on a path (ADR 0107):
+                // three lines along a wave, the Subselection tool showing the path's points
+                // with one selected (its handles out).
+                self.perform("file.new", json!({"width": 640, "height": 400}));
+                self.run("draw.rect", json!({"x": 0, "y": 0, "w": 640, "h": 400, "fill": "#f1faee", "stroke": null}));
+                self.run("layer.new", json!({"name": "Title"}));
+                // i18n-exempt: document content
+                let text = self.run("text.create", json!({"text": "Text follows its own path\nline by line, in parallel\nand the path edits in place", "x": 40, "y": 40, "size": 24, "color": "#1d3557", "align": "center", "runs": [{"chars": 25, "bold": true}, {"chars": 27, "color": "#e76f51"}, {"chars": 28, "italic": true}]})).and_then(|v| v["element"].as_u64());
+                let wave = self.run("draw.path", json!({"d": "M60 170 C200 40 300 40 330 150 C360 260 470 250 580 130", "fill": null, "stroke": "#1d3557", "stroke_width": 1})).and_then(|v| v["element"].as_u64());
+                if let (Some(t), Some(w)) = (text, wave) {
+                    self.run("element.select", json!({"ids": [t]}));
+                    self.run("text.attach_path", json!({"path": w}));
+                    self.run("element.select", json!({"ids": [w]}));
+                    self.run("edit.delete", json!({}));
+                    self.run("element.select", json!({"ids": [t]}));
+                    self.points = vec![(anicraft_engine::doc::ElementId(t), 1, anicraft_engine::geom::edit::ANCHOR)];
+                }
+                self.tool = Tool::Subselect;
+            }
+            Some("richtext") => {
+                // Styled text (ADR 0085): a title with bold, coloured and superscript runs and a
+                // centred paragraph, open for typing with a word selected, its style in
+                // Properties.
+                self.perform("file.new", json!({"width": 640, "height": 400}));
+                // i18n-exempt: document content
+                let made = self.run("text.create", json!({"text": "Energy E = mc2\nStyled runs in one block", "x": 60, "y": 90, "size": 44, "color": "#264653", "width": 520}));
+                if let Some(id) = made.and_then(|v| v["element"].as_u64()) {
+                    self.run("text.style", json!({"start": 0, "end": 6, "bold": true, "color": "#e76f51"}));
+                    self.run("text.style", json!({"start": 13, "end": 14, "shift": "superscript"}));
+                    self.run("text.style", json!({"start": 15, "end": 39, "size": 26, "italic": true, "color": "#2a9d8f"}));
+                    self.run("text.style", json!({"start": 22, "end": 26, "underline": true, "url": "https://example.org"}));
+                    self.run("text.paragraph", json!({"start": 15, "end": 39, "align": "center"}));
+                    let block = self.s.visible_elements().into_iter().find(|e| e.id.0 == id).and_then(|e| match &e.kind {
+                        anicraft_engine::doc::ElementKind::Text(t) => Some((e.transform.apply(anicraft_engine::geom::Vec2::ZERO), t.clone())),
+                        _ => None,
+                    });
+                    if let Some((at, t)) = block {
+                        self.tool = Tool::Text;
+                        let mut te = TextEditing::new(egui::pos2(at.x, at.y), Some(anicraft_engine::doc::ElementId(id)), Some(&t), &self.s.text_style);
+                        te.sel = (0, 6);
+                        self.text_edit = Some(te);
+                    }
+                }
+            }
+            Some(which @ ("textfields" | "testtext" | "htmltext" | "embedfield")) => {
                 // Dynamic and input text fields (ADR 0066): a score a script sets, a name field
                 // and a multiline notes field. `textfields` selects the name field for its
                 // Properties; `testtext` plays it in Test Movie with a name typed and Enter
@@ -1738,12 +2186,23 @@ impl App {
                 }
                 // i18n-exempt: script source, document content
                 let code = "stop();\nscore_txt.text = \"Type your name, then press Enter\";\nstage.addEventListener(KeyboardEvent.KEY_DOWN, onKey);\n\nfunction onKey(e:KeyboardEvent):void {\n\tif (e.keyCode == Keyboard.ENTER && name_txt.length > 0) {\n\t\tscore_txt.text = \"Hello, \" + name_txt.text + \"!\";\n\t}\n}\n";
+                // `htmltext` (ADR 0107): styled text from a script, a change listener that
+                // answers every keystroke, and what the viewer may type limited.
+                // i18n-exempt: script source, document content
+                let html_code = "stop();\nscore_txt.htmlText = \"Type a <b>name</b> in <font color=\\\"#e76f51\\\">letters only</font>\";\nname_txt.maxChars = 12;\nname_txt.restrict = \"A-Za-z \";\nname_txt.addEventListener(Event.CHANGE, onChange);\n\nfunction onChange(e:Event):void {\n\tscore_txt.htmlText = \"<i>Hello,</i> <b><font color=\\\"#2a9d8f\\\">\" + name_txt.text + \"</font></b> <font size=\\\"16\\\">(\" + name_txt.length + \" of \" + name_txt.maxChars + \")</font>\";\n}\n";
+                let code = if which == "htmltext" { html_code } else { code };
                 self.run("layer.new", json!({}));
                 self.run("script.set", json!({"frame": 0, "text": code, "language": "actionscript3"}));
-                if which == "textfields" {
+                if which == "textfields" || which == "embedfield" {
                     self.run("layer.select", json!({"index": 1}));
-                    if let Some(id) = self.s.visible_elements().iter().find(|e| e.name == "name_txt").map(|e| e.id.0) {
+                    let name = if which == "embedfield" { "score_txt" } else { "name_txt" };
+                    if let Some(id) = self.s.visible_elements().iter().find(|e| e.name == name).map(|e| e.id.0) {
                         self.run("element.select", json!({"ids": [id]}));
+                    }
+                    // `embedfield`: the score's digits and words travel with the HTML export.
+                    if which == "embedfield" {
+                        // i18n-exempt: document content
+                        self.run("text.field", json!({"embed": "Score: 0123456789"}));
                     }
                 } else {
                     // Floating inside the editor, so the screenshot shows it (this run only).
@@ -1767,6 +2226,74 @@ impl App {
                 self.tool = Tool::Transform;
                 self.run("layer.select", json!({"index": 0}));
                 self.run("edit.select_all", json!({}));
+            }
+            Some(which @ ("shapecommands" | "expandfill" | "softenfill")) => {
+                // Modify › Shape (ADR 0109) on a new layer: a dashed, tapering line converted to
+                // fills (selected: Properties shows a fill, no line), a star with its fill
+                // expanded, and a blob with a soft edge of twelve steps. "expandfill" and
+                // "softenfill" show their dialogs over a selected shape instead.
+                self.tool = Tool::Select;
+                self.run("layer.new", json!({"name": "Shapes"}));
+                self.run("draw.object_drawing", json!({"on": true}));
+                self.run("draw.star", json!({"cx": 760, "cy": 560, "outer": 70, "points": 5, "fill": "#f3d36b", "stroke": null}));
+                self.run("modify.expand_fill", json!({"distance": 14}));
+                self.run("draw.path", json!({"d": "M 880 600 C 880 500 1010 470 1070 540 C 1130 610 1080 680 990 670 C 930 664 880 650 880 600 Z", "fill": "#e8553b", "stroke": null}));
+                if which == "shapecommands" {
+                    self.run("modify.soften_fill_edges", json!({"distance": 36, "steps": 12}));
+                    self.run("draw.path", json!({"d": "M 80 620 C 200 480 300 720 420 580 C 500 490 600 520 660 640", "fill": null, "stroke": "#1b2a4a", "stroke_width": 18, "profile": "taper_end", "dash": [46, 16], "cap": "round"}));
+                    self.run("modify.lines_to_fills", json!({}));
+                } else {
+                    crate::shape_dialogs::open(self, if which == "expandfill" { crate::shape_dialogs::Kind::Expand } else { crate::shape_dialogs::Kind::Soften });
+                }
+            }
+            Some("origins") => {
+                // Transformation origins (ADR 0109, #296): three hands, each an instance whose
+                // registration point is at one end, selected with Free Transform and turned a
+                // sixth of a turn each about its own point; Properties shows Transform about.
+                self.run("layer.new", json!({"name": "Hands"}));
+                self.run("draw.object_drawing", json!({"on": true}));
+                for (i, (x, y)) in [(260.0f32, 600.0f32), (560.0, 560.0), (860.0, 620.0)].into_iter().enumerate() {
+                    self.run("draw.rect", json!({"x": x - 90.0, "y": y - 9.0, "w": 180, "h": 18, "radius": 9, "fill": "#1b2a4a", "stroke": null}));
+                    if let Some(id) = self.run("modify.convert_to_symbol", json!({"name": format!("Hand {}", i + 1)})).and_then(|v| v["instance"].as_u64()) {
+                        // i18n-exempt: a sample symbol name
+                        self.run("symbol.edit", json!({"id": id}));
+                        self.run("edit.select_all", json!({}));
+                        self.run("element.translate", json!({"dx": 80, "dy": 0}));
+                        self.run("symbol.exit", json!({}));
+                    }
+                }
+                let layer = self.s.layer;
+                let ids: Vec<u64> = self.s.elements_on(layer).iter().map(|e| e.id.0).collect();
+                self.run("element.select", json!({"ids": ids}));
+                self.tool = Tool::Transform;
+                self.run("modify.transform_origin", json!({"mode": "registration"}));
+                let (sin, cos) = (-60f32).to_radians().sin_cos();
+                self.run("modify.transform", json!({"a": cos, "b": sin, "c": -sin, "d": cos, "e": 0, "f": 0, "origin": "registration"}));
+            }
+            Some("pivot") => {
+                // The transformation point and the turned box (ADR 0111; #302, #175): an arm,
+                // an instance whose transformation point was moved to its shoulder, turned 35°
+                // about it with Free Transform. Its box is turned with it, the white circle is
+                // on the shoulder, and Properties shows the point.
+                self.run("layer.new", json!({"name": "Arm"}));
+                self.run("draw.object_drawing", json!({"on": true}));
+                self.run("draw.rect", json!({"x": 420, "y": 520, "w": 300, "h": 44, "radius": 22, "fill": "#1b2a4a", "stroke": null}));
+                self.run("modify.convert_to_symbol", json!({"name": "Arm"})); // i18n-exempt: a sample symbol name
+                self.tool = Tool::Transform;
+                self.run("modify.transformation_point", json!({"x": 442, "y": 542}));
+                let (sin, cos) = (-35f32).to_radians().sin_cos();
+                let turn = anicraft_engine::geom::Affine::translate(442.0, 542.0).mul(&anicraft_engine::geom::Affine { m: [cos, sin, -sin, cos, 0.0, 0.0] }).mul(&anicraft_engine::geom::Affine::translate(-442.0, -542.0));
+                let [a, b, c, d, e, f] = turn.m;
+                self.run("modify.transform", json!({"a": a, "b": b, "c": c, "d": d, "e": e, "f": f}));
+            }
+            Some("layeropacity") => {
+                // Layer opacity (ADR 0111, #279): the top two layers faded, each as one, with
+                // the percentage beside their names; Layer Properties open on the active one.
+                let ids: Vec<u64> = self.s.timeline().layers.iter().filter(|l| !matches!(l.kind, anicraft_engine::doc::LayerKind::Folder | anicraft_engine::doc::LayerKind::Camera)).map(|l| l.id.0).collect();
+                for (id, opacity) in ids.iter().zip([40, 65]) {
+                    self.run("layer.set_opacity", json!({"layer": id, "opacity": opacity}));
+                }
+                crate::layer_props::open(self, ids.first().map(|id| anicraft_engine::doc::LayerId(*id)));
             }
             Some("points") => {
                 // A pencil stroke and a pen path being edited, with one smooth point selected.
@@ -1872,6 +2399,16 @@ impl App {
                 self.run("raw.subselect", json!({"x": 400, "y": 400, "slop": 4}));
                 self.raw_ends = Vec::new();
                 self.raw_anchors = vec![anicraft_engine::geom::Vec2::new(620.0, 270.0)];
+            }
+            Some("parenting") | Some("parentmenu") => {
+                // Layer parenting (ADR 0113): an arm of three parented layers, mid-tween, the
+                // timeline's parenting view open and the forearm selected.
+                self.run("file.new_sample", json!({"which": "arm"}));
+                self.prefs.timeline_parenting = true;
+                self.run("timeline.goto", json!({"frame": 12}));
+                let fore = self.s.timeline().layers.get(1).map(|l| l.id.0);
+                self.run("layer.select", json!({"layer": fore, "select": true}));
+                self.view.fit = true;
             }
             Some("rawsnap") => {
                 // Snapping while drawing (ADR 0045): a line being drawn from a corner of a raw
@@ -2220,6 +2757,12 @@ impl App {
                 self.brush_samples = (0..=30).map(|i| (anicraft_engine::geom::Vec2::new(720.0 + i as f32 * 12.0, 310.0), None)).collect();
                 crate::erasertool::commit(self, crate::pathtools::Xf { origin: egui::Pos2::ZERO, zoom: 1.0 });
             }
+            Some(which @ ("datachart" | "datatable")) => {
+                // Data tables that drive animation (ADR 0118): a bar chart whose bars follow a
+                // table's columns, one selected with its bindings in Properties; `datatable`
+                // also has the table viewer open.
+                crate::data_ui::sample_chart(self, which == "datatable");
+            }
             Some("eyedropper") => {
                 // The sample's sky gradient picked with the Eyedropper: the fill swatch holds it.
                 self.run("paint.pick", json!({"x": 640, "y": 40}));
@@ -2256,6 +2799,40 @@ impl App {
                 if self.import_demo_beat() {
                     self.run("sound.set", json!({"frame": 0, "sync": "stream"}));
                     self.run("timeline.goto", json!({"frame": 14}));
+                }
+            }
+            Some(which @ ("audiokeys" | "audiokeysevent")) => {
+                // Convert Audio to Keyframes (ADR 0114): the beat as a stream, its dialog open
+                // on the demo's star, whose scale follows the beat (previewed on the timeline).
+                // `audiokeysevent`: as an Event sound, with the dialog's note that keys can drift.
+                if self.import_demo_beat() {
+                    self.run("sound.set", json!({"frame": 0, "sync": if which == "audiokeysevent" { "event" } else { "stream" }}));
+                    let star = self.s.timeline().layers.iter().find(|l| l.name == "Star").map(|l| l.id.0);
+                    crate::audio_keys::open(self, crate::audio_keys::Kind::Keys);
+                    if let Some(id) = star {
+                        crate::audio_keys::aim(self, id, 4);
+                    }
+                }
+            }
+            Some(which @ ("lipsync" | "lipsynced")) => {
+                // Auto Lip-Sync (ADR 0114): the mouth chart template with a few made-up
+                // syllables on a sound layer; its dialog open with the mouths previewed, or
+                // ("lipsynced") the result on the timeline, the Mouth layer active on an "oh".
+                self.perform("file.new_from_template", json!({"template": "lip-sync"}));
+                if self.import_demo_speech() {
+                    self.run("sound.set", json!({"frame": 0, "sync": "stream"}));
+                    let mouth = self.s.timeline().layers.iter().find(|l| l.name == "Mouth").map(|l| l.id.0);
+                    crate::audio_keys::open(self, crate::audio_keys::Kind::Lips);
+                    if which == "lipsynced" {
+                        crate::audio_keys::finish(self);
+                        if let Some(id) = mouth {
+                            self.run("layer.select", json!({"layer": id}));
+                        }
+                        self.run("timeline.goto", json!({"frame": 10}));
+                        self.s.mark_saved();
+                    } else if let Some(id) = mouth {
+                        crate::audio_keys::aim(self, id, 10);
+                    }
                 }
             }
             Some("plugineases") => {
@@ -2439,6 +3016,62 @@ impl App {
                 self.bone_sel = bones.get(1).copied().map(anicraft_engine::doc::BoneId);
                 self.tool = Tool::Bind;
             }
+            Some("mixedbones") => {
+                // A mixed armature (ADR 0098): a character whose body is a shape with three
+                // bones inside it, its head a symbol instance on the body's neck joint, and a
+                // plume shape on the head with two bones of its own. Leaning at frame 1, the
+                // other way at frame 24; the head's bone picked.
+                self.run("layer.new", json!({"name": "Character"}));
+                let id = |v: Option<Value>, k: &str| v.and_then(|v| v[k].as_u64()).unwrap_or(0);
+                // The body: hips at y = 500, neck at y = 250, a point every 25 px up both sides.
+                let half = |y: f32| 34.0 + 14.0 * ((y - 250.0) / 250.0);
+                let ys: Vec<f32> = (0..=10).map(|i| 500.0 - 25.0 * i as f32).collect();
+                let mut d = String::new();
+                for (i, y) in ys.iter().enumerate() {
+                    d.push_str(&format!("{}{} {y} ", if i == 0 { "M" } else { "L" }, 540.0 - half(*y)));
+                }
+                for y in ys.iter().rev() {
+                    d.push_str(&format!("L{} {y} ", 540.0 + half(*y)));
+                }
+                d.push('Z');
+                let body = id(self.run("draw.path", json!({"d": d, "fill": "#5f8dd3", "stroke": "#1b2a4a", "stroke_width": 3, "object": true})), "element");
+                // The plume: a leaf from the top of the head up, a point every 10 px.
+                let wide = |y: f32| 3.0 + 9.0 * (1.0 - ((y - 105.0) / 45.0).powi(2)).max(0.0);
+                let ys: Vec<f32> = (0..=9).map(|i| 150.0 - 10.0 * i as f32).collect();
+                let mut d = String::new();
+                for (i, y) in ys.iter().enumerate() {
+                    d.push_str(&format!("{}{} {y} ", if i == 0 { "M" } else { "L" }, 540.0 - wide(*y)));
+                }
+                for y in ys.iter().rev() {
+                    d.push_str(&format!("L{} {y} ", 540.0 + wide(*y)));
+                }
+                d.push('Z');
+                let plume = id(self.run("draw.path", json!({"d": d, "fill": "#e8833a", "stroke": "#4a2c14", "stroke_width": 2, "object": true})), "element");
+                self.run("draw.rect", json!({"x": 496, "y": 150, "w": 88, "h": 96, "radius": 42, "fill": "#ffd9a8", "stroke": "#1b2a4a", "stroke_width": 3}));
+                let head = id(self.run("modify.convert_to_symbol", json!({"name": "Head"})), "instance");
+                self.run("timeline.insert_frame", json!({"frame": 23}));
+                self.run("timeline.goto", json!({"frame": 0}));
+                // Bones inside the body, from the hips up...
+                let mut bone = id(self.run("bone.add_in_shape", json!({"shape": body, "head": [540, 498], "tail": [540, 415]})), "bone");
+                let mut spine = vec![bone];
+                for y in [330, 252] {
+                    bone = id(self.run("bone.add_in_shape", json!({"parent": bone, "tail": [540, y]})), "bone");
+                    spine.push(bone);
+                }
+                // ...on from the neck joint to the head instance, from the head to the plume as
+                // a whole, and on inside the plume.
+                let neck = id(self.run("bone.add", json!({"parent": bone, "to": head, "tail": [540, 198]})), "bone");
+                let crest = id(self.run("bone.add", json!({"from": head, "to": plume, "tail": [540, 150]})), "bone");
+                let f1 = id(self.run("bone.add_in_shape", json!({"parent": crest, "tail": [540, 105]})), "bone");
+                let f2 = id(self.run("bone.add_in_shape", json!({"parent": f1, "tail": [540, 62]})), "bone");
+                for (b, (a, z)) in spine.iter().chain([&neck, &crest, &f1, &f2]).zip([(4, -3), (9, -8), (11, -10), (14, -12), (6, -4), (22, -18), (30, -26)]) {
+                    self.run("bone.pose", json!({"bone": b, "angle": a, "frame": 0}));
+                    self.run("bone.pose", json!({"bone": b, "angle": z, "frame": 23}));
+                }
+                self.run("timeline.goto", json!({"frame": 0}));
+                self.tool = Tool::Select;
+                crate::bone_tool::select(self, self.s.layer, Some(anicraft_engine::doc::BoneId(neck)));
+            }
             Some("shapeweights") => {
                 // Painted weights (ADR 0090): the tail of `shapebones` at rest, a point added to
                 // its outline with Subselection, and the second bone's weights mid-stroke with
@@ -2618,6 +3251,56 @@ impl App {
                     let _ = self.s.execute("edit.deselect", &json!({}));
                 }
             }
+            Some("motioncolour") => {
+                // A glow's colour tweening in the Motion Editor (ADR 0099): the Star becomes a
+                // movie clip with a glow that goes from gold to magenta and is knocked out for
+                // the last third; the editor lists the colour's channels and shows the red one.
+                self.run("layer.select", json!({"index": 1}));
+                self.run("timeline.goto", json!({"frame": 0}));
+                self.run("edit.select_all", json!({}));
+                self.run("symbol.set_kind", json!({"kind": "movie_clip"}));
+                self.run("element.set_filters", json!({"filters": [{"type": "glow", "color": "#ffd54a", "blur_x": 18, "blur_y": 18, "strength": 2, "quality": 2}]}));
+                if self.run("timeline.create_motion_tween", json!({"frame": 0})).is_some() {
+                    let frames = self.s.active_layer().and_then(|l| l.keyframes.first()).map_or(24, |k| k.duration);
+                    let (mid, end) = (frames / 2, frames.saturating_sub(1));
+                    self.run("motion.set_key", json!({"property": "filter.0.color", "frame": mid, "color": "#ff3ea5"}));
+                    self.run("motion.set_key", json!({"property": "filter.0.color", "frame": end, "color": "#5b8cff"}));
+                    self.run("motion.set_ease", json!({"property": "filter.0.color", "frame": 1, "easing": "CubicOut"}));
+                    self.run("motion.set_key", json!({"property": "filter.0.knockout", "frame": end.saturating_sub(frames / 3), "value": 1}));
+                    self.s.mark_saved();
+                    self.show_panel(crate::dock::Panel::MotionEditor);
+                    // The colour's channels listed (the editor starts a span with them closed).
+                    let start = self.s.active_layer().and_then(|l| l.keyframes.first()).map_or(0, |k| k.start);
+                    self.me_sel_at = (self.s.layer.0, start);
+                    self.me_open = vec![(0, anicraft_engine::doc::FilterColor::Color)];
+                    self.me_prop = anicraft_engine::doc::Property::from_key("filter.0.color_red").unwrap_or(anicraft_engine::doc::Property::X);
+                    self.me_key = Some(0);
+                    // The filter rows in view.
+                    self.me_vscroll = 7.0;
+                    self.run("timeline.goto", json!({"frame": mid / 2}));
+                    let _ = self.s.execute("edit.deselect", &json!({}));
+                }
+            }
+            Some("textshadow") => {
+                // A dynamic text field with a drop shadow and a glow switched off, selected:
+                // Properties › Filters lists them on text as on a movie clip (ADR 0099), and the
+                // stage draws the field (box, border and text) through them.
+                if self.run("text.create", json!({"text": "Score 0042", "type": "dynamic", "x": 760, "y": 520, "size": 64, "bold": true, "color": "#1b2a4a"})).is_some() {
+                    self.run("text.field", json!({"border": true, "background": true, "background_color": "#fff6d8"}));
+                    self.run("instance.set_name", json!({"name": "score_txt"}));
+                    self.run(
+                        "element.set_filters",
+                        json!({"filters": [
+                            {"type": "drop_shadow", "blur_x": 12, "blur_y": 12, "distance": 14, "strength": 0.6, "quality": 2, "color": "#1b2a4a"},
+                            {"type": "glow", "blur_x": 8, "blur_y": 8, "color": "#ff3ea5", "enabled": false},
+                        ]}),
+                    );
+                    for p in [crate::dock::Panel::Align, crate::dock::Panel::Library, crate::dock::Panel::MovieExplorer, crate::dock::Panel::History] {
+                        self.dock.close(p);
+                    }
+                    self.s.mark_saved();
+                }
+            }
             Some("motionstretch") => {
                 // A motion span stretched by its end (ADR 0083): `motionspan`'s tween made half
                 // as long again, its keys in proportion, and its end being dragged further.
@@ -2693,6 +3376,42 @@ impl App {
                 self.me_prop = anicraft_engine::doc::Property::Y;
                 self.me_key = None;
             }
+            Some("keeparea") => {
+                // Keep area (ADR 0115): the Star layer's span as a motion tween that stretches
+                // the star to twice its width half way; its height isn't keyed and follows.
+                // The Motion Editor shows the derived Scale Y curve.
+                self.run("layer.select", json!({"index": 1}));
+                if let Some(target) = self.run("timeline.create_motion_tween", json!({"frame": 0})).and_then(|_| self.run("motion.info", json!({"frame": 0}))).and_then(|v| v["target"].as_u64()) {
+                    self.run("timeline.set_keep_area", json!({"keep_area": true}));
+                    self.run("timeline.goto", json!({"frame": 24}));
+                    self.run("element.select", json!({"ids": [target]}));
+                    self.run("element.set_transform", json!({"sx": 2.0}));
+                    self.s.mark_saved();
+                }
+                self.run("timeline.goto", json!({"frame": 12}));
+                self.frame_sel = Some(timeline::FrameSel::cell(self.s.layer, 12));
+                self.show_panel(crate::dock::Panel::MotionEditor);
+                self.me_prop = anicraft_engine::doc::Property::ScaleY;
+                self.me_key = None;
+            }
+            Some("penpoints") => {
+                // The Pen on a selected open path (ADR 0115): its points show, and its end has
+                // been picked up to draw on from, with the last curve being drawn again (Alt),
+                // the segment as it was still in view.
+                self.tool = Tool::Pen;
+                self.s.style.object_drawing = true;
+                if let Some(id) = self.run("draw.path", json!({"d": "M120 260 C160 180 240 180 280 260 L360 260", "object": true, "fill": null})).and_then(|_| self.s.selection.ids().next()).map(|id| id.0) {
+                    self.s.mark_saved();
+                    let v = |x: f32, y: f32| anicraft_engine::geom::Vec2::new(x, y);
+                    let was = [v(440.0, 200.0), v(400.0, 190.0), v(480.0, 210.0)];
+                    self.pen = Some(pathtools::PenPath {
+                        knots: vec![[v(360.0, 260.0); 3], [v(440.0, 200.0), v(430.0, 250.0), v(450.0, 150.0)]],
+                        dragging: true,
+                        grip: pathtools::PenGrip::Adjust { was },
+                        extends: Some((anicraft_engine::doc::ElementId(id), false)),
+                    });
+                }
+            }
             Some("pen") => {
                 // A pen path still being drawn: a corner, a smooth point with handles, a corner.
                 self.tool = Tool::Pen;
@@ -2700,7 +3419,7 @@ impl App {
                 let mut curve = k(260.0, 140.0);
                 curve[1] = anicraft_engine::geom::Vec2::new(220.0, 180.0);
                 curve[2] = anicraft_engine::geom::Vec2::new(300.0, 100.0);
-                self.pen = Some(pathtools::PenPath { knots: vec![k(120.0, 160.0), curve, k(380.0, 150.0)], dragging: false });
+                self.pen = Some(pathtools::PenPath { knots: vec![k(120.0, 160.0), curve, k(380.0, 150.0)], ..Default::default() });
             }
             _ => {}
         }
@@ -2708,7 +3427,7 @@ impl App {
 
     /// Any modal (prompt, confirmation, close guard) is open: global shortcuts pause.
     pub fn modal_open(&self) -> bool {
-        self.prompt.is_some() || self.convert.is_some() || self.confirm.is_some() || self.close_dialog || self.plugin_dialog.is_some() || self.templates.save.is_some()
+        self.prompt.is_some() || self.convert.is_some() || self.shape_dialog.is_some() || self.trace.is_some() || self.doc_settings.is_some() || self.audio_keys.is_some() || self.confirm.is_some() || self.tabs.asking() || self.plugin_dialog.is_some() || self.templates.save.is_some() || self.video_import.is_some()
     }
 
     /// The single entry point for user-initiated commands: asks first when the engine says the
@@ -2721,6 +3440,20 @@ impl App {
         {
             o.insert("folder".into(), json!(f.display().to_string()));
         }
+        // Import Again (ADR 0118): the file picked replaces the table it was asked for.
+        if id == "data.import_table"
+            && let Some(t) = self.data_reimport.take()
+            && params.get("table").is_none()
+            && let Some(o) = params.as_object_mut()
+        {
+            o.insert("table".into(), json!(t.0));
+        }
+        // New and Open bring their document in a tab of its own (ADR 0112): the one being
+        // edited stays open, so there is nothing to ask about.
+        if crate::tabs::opens_document(id) {
+            self.perform(id, params);
+            return;
+        }
         if let Some(c) = self.s.confirmation(id, &params)
             && (c.irreversible || !self.skip_confirm.contains(id))
         {
@@ -2731,12 +3464,29 @@ impl App {
         self.perform(id, params);
     }
 
-    /// Runs a command and reports the outcome; routine destructive edits say how to undo.
+    /// Runs a command and reports the outcome; routine destructive edits say how to undo. A
+    /// command that brings a document (New, Open, a restored copy) runs in a new tab (ADR 0112).
     pub fn perform(&mut self, id: &str, params: Value) -> Option<Value> {
+        if crate::tabs::opens_document(id) {
+            return crate::tabs::open(self, id, params);
+        }
+        self.perform_here(id, params)
+    }
+
+    /// [`App::perform`] on the document being edited, whatever the command.
+    pub(crate) fn perform_here(&mut self, id: &str, params: Value) -> Option<Value> {
         if id == "file.publish" {
             // File › Publish runs in the background, with its own progress view (ADR 0060).
             crate::publish_panel::start(self, &params);
             return None;
+        }
+        if id == "file.import_video" && params.get("mode").is_none() && !platform::WEB {
+            // From the menu, with only the file chosen: the Import Video window asks how to
+            // take it, and decodes with progress and Cancel (ADR 0116).
+            if let Some(path) = params.get("path").and_then(Value::as_str) {
+                crate::video_import::open(self, PathBuf::from(path));
+                return None;
+            }
         }
         let selected = self.s.selection.len();
         // A browser's autosaved copy opens as a file (ADR 0036): it is a restore all the same.
@@ -2805,9 +3555,15 @@ impl App {
                 // In a browser the file goes to the downloads (ADR 0036).
                 let path = v["saved"].as_str().unwrap_or("");
                 self.status_ok(if platform::WEB { tr!("Saved {path} to your downloads", path = path) } else { tr!("Saved {path}", path = path) });
-                if self.close_after_save {
-                    self.allow_close = true;
-                }
+            }
+            "data.import_table" => crate::data_ui::imported(self, v),
+            "data.unbind" => {
+                let n = v["removed"].as_u64().unwrap_or(0);
+                self.status_ok(trn!("Removed {n} data binding. {undo} to undo.", "Removed {n} data bindings. {undo} to undo.", n, undo = self.undo_key()));
+            }
+            "data.bake" => {
+                let n = v["keys"].as_u64().unwrap_or(0);
+                self.status_ok(trn!("Baked the data into {n} new keyframe. {undo} to undo.", "Baked the data into {n} new keyframes. {undo} to undo.", n, undo = self.undo_key()));
             }
             "file.import" | "file.import_to_library" if v.get("sound").is_some() => {
                 let id = anicraft_engine::doc::SoundId(v["sound"].as_u64().unwrap_or(0));
@@ -2841,6 +3597,35 @@ impl App {
                 } else {
                     trn!("Replaced {n} place — {undo} to undo", "Replaced {n} places — {undo} to undo", n, undo = self.undo_key())
                 });
+            }
+            "file.import_video" => {
+                let undo = self.undo_key();
+                let n = v["frames"].as_u64().unwrap_or(0);
+                let from = v["from"].as_u64().unwrap_or(0) + 1;
+                let mut said = if v["mode"] == "reference" {
+                    // The pictures come from the file as the playhead moves.
+                    self.video.retry();
+                    trn!("The video is on a locked guide layer under the layer you are on, for {n} frame. Draw on the layers above it; it is never exported. {undo} to undo.", "The video is on a locked guide layer under the layer you are on, for {n} frames. Draw on the layers above it; it is never exported. {undo} to undo.", n, undo = undo)
+                } else if v["sound"].is_null() {
+                    trn!("{n} video frame is on a new layer from frame {from}. {undo} to undo.", "{n} video frames are on a new layer from frame {from}. {undo} to undo.", n, from = from, undo = undo)
+                } else {
+                    trn!("{n} video frame is on a new layer from frame {from}, with its sound on the layer below. {undo} to undo.", "{n} video frames are on a new layer from frame {from}, with their sound on the layer below. {undo} to undo.", n, from = from, undo = undo)
+                };
+                if v["truncated"] == true {
+                    said.push(' ');
+                    said.push_str(tr!("The video was longer than one import takes: the rest was left out."));
+                }
+                if let Some(note) = v["note"].as_str() {
+                    said.push(' ');
+                    said.push_str(&crate::i18n::t_dyn(note));
+                }
+                self.status_ok(said);
+            }
+            "layer.set_video" => {
+                // Another file (or the same one, back): its pictures are read afresh.
+                self.video.retry();
+                self.video_failed = None;
+                self.status_ok(if v["video"].is_null() { tr!("Removed the reference video — {undo} to undo", undo = self.undo_key()) } else { tr!("The reference video is relinked — {undo} to undo", undo = self.undo_key()) });
             }
             "file.import" => {
                 if let Some(b) = self.s.doc.bitmaps.last().filter(|b| v["bitmap"].as_u64() == Some(b.id.0)) {
@@ -2889,7 +3674,7 @@ impl App {
                 let done = trn!("Exported {path} ({n} frame, {layers} layers).", "Exported {path} ({n} frames, {layers} layers).", v["frames"].as_u64().unwrap_or(0), path = v["written"].as_str().unwrap_or(""), layers = v["layers"]);
                 self.status_ok(format!("{done}{report}"));
             }
-            "file.export_png" | "file.export_png_sequence" | "file.export_gif" | "file.export_svg" | "file.export_video" => self.status_ok(tr!("Exported {path}", path = v.get("written").or_else(|| v.get("dir")).and_then(Value::as_str).unwrap_or(""))),
+            "file.export_png" | "file.export_png_sequence" | "file.export_svg_sequence" | "file.export_gif" | "file.export_svg" | "file.export_video" => self.status_ok(tr!("Exported {path}", path = v.get("written").or_else(|| v.get("dir")).and_then(Value::as_str).unwrap_or(""))),
             // Undo labels are the engine's English, translated when a catalog has them.
             "edit.undo" => self.status_ok(tr!("Undid {action}", action = crate::i18n::t_dyn(v["undone"].as_str().unwrap_or("")))),
             "edit.redo" => self.status_ok(tr!("Redid {action}", action = crate::i18n::t_dyn(v["redone"].as_str().unwrap_or("")))),
@@ -2961,7 +3746,7 @@ impl App {
             return;
         }
         if id == "file.recovery_list" {
-            if !self.recovery.rescan() {
+            if !self.recovery.rescan(&crate::tabs::recovery_sessions(self)) {
                 return; // a browser answers on a later frame (autosave::tick)
             }
             self.recovery.show = !self.recovery.found.is_empty();
@@ -3056,10 +3841,70 @@ impl App {
             crate::convert_symbol::open(self);
             return;
         }
+        // A picture copied in another app (a paint program, a screenshot) is what Paste means
+        // when it is the newest thing copied (#263).
+        if matches!(id, "edit.paste" | "edit.paste_in_place") && self.paste_from_system() {
+            return;
+        }
+        // Pasted raw artwork floats, selected, until it is deselected (as in Animate), so it
+        // can be dragged off what it landed on before the two join (#391).
+        // Modify › Shape › Expand Fill and Soften Fill Edges ask for a distance (ADR 0109).
+        if id == "modify.expand_fill" {
+            crate::shape_dialogs::open(self, crate::shape_dialogs::Kind::Expand);
+            return;
+        }
+        if id == "modify.soften_fill_edges" {
+            crate::shape_dialogs::open(self, crate::shape_dialogs::Kind::Soften);
+            return;
+        }
+        // Modify › Document Settings asks for the stage's size, frame rate and colour (#505;
+        // headless, the command takes them).
+        if id == "doc.set_stage" {
+            crate::doc_settings::open(self);
+            return;
+        }
+        // Modify › Bitmap › Trace Bitmap asks for Animate's four settings (#463).
+        if id == "modify.trace_bitmap" {
+            crate::trace_dialog::open(self);
+            return;
+        }
+        // Convert Audio to Keyframes and Auto Lip-Sync ask what the sound drives, with a live
+        // preview (ADR 0114; headless, the commands take the settings).
+        if id == "sound.to_keyframes" {
+            crate::audio_keys::open(self, crate::audio_keys::Kind::Keys);
+            return;
+        }
+        if id == "sound.lip_sync" {
+            crate::audio_keys::open(self, crate::audio_keys::Kind::Lips);
+            return;
+        }
+        // Modify › Data › Bind to Data binds the selected instance's next property to a table's
+        // column, to be changed in Properties (ADR 0118; headless, the command takes them).
+        if id == "data.bind" {
+            crate::data_ui::bind_from_menu(self);
+            return;
+        }
+        // A plain Import Data Table makes a new table (Import Again names the one to replace
+        // after asking for the file).
+        if id == "data.import_table" {
+            self.data_reimport = None;
+        }
+        if id == "modify.transform_origin" {
+            // The key or the menu moves to the next mode, and says which it is.
+            if let Some(v) = self.run(id, json!({})) {
+                let mode = v["mode"].as_str().and_then(anicraft_engine::TransformOrigin::from_key).unwrap_or_default();
+                self.status_ok(tr!("Transformation origin: {mode}.", mode = crate::panels::transform_origin_label(mode)));
+            }
+            return;
+        }
         if id == "edit.paste" {
             // Paste in the centre of what you are looking at.
             let c = self.view_center_stage();
-            self.request(id, json!({"x": c.x, "y": c.y}));
+            self.request(id, json!({"x": c.x, "y": c.y, "float": true}));
+            return;
+        }
+        if id == "edit.paste_in_place" {
+            self.request(id, json!({"float": true}));
             return;
         }
         let prompt = match id {
@@ -3070,6 +3915,7 @@ impl App {
             "scene.rename" => Some((tr_noop!("Rename scene"), "name", self.s.doc.scenes.get(self.s.scene).map_or_else(String::new, |s| s.name.clone()))),
             "file.export_png" => Some((tr_noop!("Export frame as PNG"), "path", format!("frame_{:04}.png", self.s.frame + 1))),
             "file.export_png_sequence" => Some((tr_noop!("Export PNG sequence to folder"), "dir", "frames".to_string())),
+            "file.export_svg_sequence" => Some((tr_noop!("Export SVG sequence to folder"), "dir", "frames".to_string())),
             "file.export_gif" => Some((tr_noop!("Export animated GIF"), "path", "animation.gif".to_string())),
             "file.export_apng" => Some((tr_noop!("Export animated PNG (full colour, transparent)"), "path", "animation.png".to_string())),
             "file.export_webp" => Some((tr_noop!("Export animated WebP (lossless, transparent)"), "path", "animation.webp".to_string())),
@@ -3081,6 +3927,10 @@ impl App {
             "file.export_audio" => Some((tr_noop!("Export audio (the movie's soundtrack as a WAV)"), "path", "soundtrack.wav".to_string())),
             "file.import_to_library" => Some((tr_noop!("Import to library (WAV, OGG or MP3 sound; PNG or JPEG image)"), "path", "sound.wav".to_string())),
             "file.import" => Some((tr_noop!("Import to stage (SVG, PNG or JPEG; WAV, OGG or MP3 onto a new layer)"), "path", "drawing.svg".to_string())),
+            // A video, read by the ffmpeg on this computer (ADR 0116); or another file for the
+            // active layer's reference video.
+            "file.import_video" => Some((tr_noop!("Import video (frames in the document, or a reference layer for tracing)"), "path", "video.mp4".to_string())),
+            "layer.set_video" => Some((tr_noop!("Relink the reference video (choose the video file)"), "path", "video.mp4".to_string())),
             "plugin.install" => Some((tr_noop!("Install plug-in (.wasm file)"), "path", "plugin.wasm".to_string())),
             // Saved commands (ADR 0097): run a file, or copy one into your commands.
             "macro.run" => Some((tr_noop!("Run a saved command (a .json file)"), "path", "command.json".to_string())),
@@ -3094,10 +3944,12 @@ impl App {
             // The document's swatches (ADR 0078): a swatch file, or a GIMP palette to import.
             "swatch.export" => Some((tr_noop!("Export swatches (a swatch file)"), "path", "swatches.json".to_string())),
             "swatch.import" => Some((tr_noop!("Import swatches (a swatch file or a GIMP palette)"), "path", "swatches.json".to_string())),
+            // A table of numbers for the Library (ADR 0118).
+            "data.import_table" => Some((tr_noop!("Import a data table (CSV, TSV or JSON)"), "path", "data.csv".to_string())),
             _ => None,
         };
         if let Some((title, key, text)) = prompt {
-            let is_file = matches!(key, "path" | "dir") && (id.starts_with("file.") || matches!(id, "plugin.install" | "macro.run" | "macro.import" | "brush.preset_export" | "brush.preset_import" | "filter.preset_export" | "filter.preset_import" | "swatch.export" | "swatch.import"));
+            let is_file = matches!(key, "path" | "dir") && (id.starts_with("file.") || matches!(id, "layer.set_video" | "plugin.install" | "macro.run" | "macro.import" | "brush.preset_export" | "brush.preset_import" | "filter.preset_export" | "filter.preset_import" | "swatch.export" | "swatch.import" | "data.import_table"));
             if is_file && platform::WEB && platform::reads_file(id) {
                 // The browser's file picker (ADR 0036). The file arrives on a later frame
                 // (`open_picked`); a save or export asks for the download's name below.
@@ -3106,12 +3958,12 @@ impl App {
                 return;
             }
             if is_file && self.prefs.native_dialogs && self.shot.is_none() && !platform::WEB {
-                // The platform's own dialog (it blocks, as native dialogs do). Cancel = no-op.
+                // The platform's own dialog, shown at the end of the frame (it needs the
+                // window); the answer runs the command in a later frame. One at a time.
                 self.playing = false;
                 #[cfg(not(target_arch = "wasm32"))]
-                match platform::file_dialog(id, crate::i18n::t(title), &text) {
-                    Some(path) => self.request(id, json!({ key: path.display().to_string() })),
-                    None => self.close_after_save = false,
+                if self.file_dialog.is_none() {
+                    self.file_request = Some((id, key, crate::i18n::t(title).to_string(), text));
                 }
                 return;
             }
@@ -3123,6 +3975,12 @@ impl App {
         if let Some(p) = timeline::insert_key_params(self, id) {
             self.request(id, p);
             timeline::follow_playhead(self);
+            return;
+        }
+        // Shift+F5 and Shift+F6 with no frame selection act on every layer at the playhead, as
+        // F5 does (#438).
+        if let Some(p) = timeline::remove_key_params(self, id) {
+            self.request(id, p);
             return;
         }
         // Frame commands act on the frame selection (F5 over 3 frames on 2 layers inserts 3
@@ -3137,6 +3995,48 @@ impl App {
     }
 
     /// The stage point at the centre of the visible canvas.
+    /// Pastes the system clipboard's picture, when it is newer than what AniCraft copied.
+    /// AniCraft's own Copy leaves a note as text on the system clipboard, so while that note is
+    /// still there the artwork copied here is the newest thing.
+    fn paste_from_system(&mut self) -> bool {
+        if !self.system_clipboard {
+            return false;
+        }
+        let own = !self.s.clipboard.is_empty() && platform::clipboard_text().is_some_and(|t| t == tr!("Copied from AniCraft"));
+        if own {
+            return false;
+        }
+        let Some(image) = platform::clipboard_image() else { return false };
+        self.paste_image(&image);
+        true
+    }
+
+    /// Places `image` in the middle of the view as a bitmap, in the Library too (as an image
+    /// dropped on the stage is), selected. One undo step.
+    pub(crate) fn paste_image(&mut self, image: &platform::ClipboardImage) {
+        let png = match anicraft_engine::render::encode_png(image.width, image.height, &image.rgba) {
+            Ok(png) => png,
+            Err(e) => {
+                self.status_err(tr!("The copied picture could not be pasted: {error}", error = e.to_string()));
+                return;
+            }
+        };
+        // The engine imports files: the picture goes through one, removed again at once.
+        let dir = std::env::temp_dir().join(format!("anicraft-paste-{}", std::process::id()));
+        // The file's name becomes the bitmap's name in the Library, so it is translated.
+        let path = dir.join(format!("{}.png", tr!("Pasted image")));
+        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, png)) {
+            self.status_err(tr!("The copied picture could not be pasted: {error}", error = e.to_string()));
+            return;
+        }
+        let c = self.view_center_stage();
+        if self.run("file.drop", json!({"paths": [path.display().to_string()], "to": "stage", "x": c.x, "y": c.y})).is_some() {
+            self.status_ok(tr!("Pasted the copied picture ({w} × {h} px) — {undo} to undo", w = image.width, h = image.height, undo = self.undo_key()));
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
     pub fn view_center_stage(&self) -> egui::Vec2 {
         let size = egui::vec2(self.s.doc.stage.width as f32, self.s.doc.stage.height as f32);
         size * 0.5 - self.view.pan / self.view.zoom.max(1e-3)
@@ -3333,6 +4233,12 @@ impl App {
         if sheet {
             self.show_shortcuts = !self.show_shortcuts;
         }
+        // The next and the previous document (ADR 0112): Ctrl+Tab and Ctrl+Shift+Tab, with the
+        // Control key on every system (⌘+Tab is the Mac's own), from anywhere.
+        let doc_step = ctx.input_mut(|i| if i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab) { Some(false) } else if i.consume_key(Modifiers::CTRL, Key::Tab) { Some(true) } else { None });
+        if let Some(forward) = doc_step {
+            crate::tabs::step(self, forward);
+        }
         // Moving between panels (Ctrl+F6) works from anywhere, a text field included.
         let panel_step = ctx.input_mut(|i| {
             self.shortcuts.iter().filter(|(_, _, id)| matches!(*id, "view.next_panel" | "view.prev_panel")).find_map(|(m, k, id)| i.consume_key(*m, *k).then_some(*id == "view.next_panel"))
@@ -3351,10 +4257,22 @@ impl App {
         // The Test Movie window's movie has the keyboard (ADR 0052): its keys are the
         // movie's; only shortcuts with Ctrl (⌘) or Alt reach the app (Restart is Ctrl+Enter).
         if self.test_movie.is_some() && crate::test_movie::has_keys(ctx) {
-            let fire: Vec<&'static str> = ctx.input_mut(|i| self.shortcuts.iter().filter(|(m, _, _)| m.command || m.ctrl || m.alt).filter_map(|(m, k, id)| i.consume_key(*m, *k).then_some(*id)).collect());
-            for id in fire.into_iter().filter(|id| !id.starts_with("view.") && !id.starts_with("tool.")) {
+            // (The view's own keys stay with the window: Ctrl+W there closes the movie, not the
+            // document.)
+            let fire: Vec<&'static str> =
+                ctx.input_mut(|i| self.shortcuts.iter().filter(|(m, _, id)| (m.command || m.ctrl || m.alt) && !id.starts_with("view.") && !id.starts_with("tool.")).filter_map(|(m, k, id)| i.consume_key(*m, *k).then_some(*id)).collect());
+            for id in fire {
                 self.invoke(id);
             }
+            return;
+        }
+        // (A browser sends these keys as presses already, with its clipboard events after.)
+        if !platform::WEB {
+            ctx.input_mut(clipboard_keys_as_presses);
+        }
+        // Ctrl/⌘+V with a picture on the clipboard never arrives as a key or a paste (#263).
+        let swallowed = ctx.input(|i| self.swallowed_paste.frame(i));
+        if swallowed && self.paste_from_system() {
             return;
         }
         let control = keys == crate::a11y::Keyboard::Control;
@@ -3425,10 +4343,18 @@ impl App {
                         self.run("timeline.goto", json!({"frame": 0}));
                     }
                 }
-                "view.actions" => self.toggle_panel(crate::dock::Panel::Actions),
+                "view.hide_panels" => self.toggle_hide_panels(),
+                id if crate::dock::Panel::from_action(id).is_some() => {
+                    if let Some(p) = crate::dock::Panel::from_action(id) {
+                        self.window_menu_panel(p);
+                    }
+                }
                 "view.find_next" => crate::find_panel::step(self, true),
                 "view.find_prev" => crate::find_panel::step(self, false),
-                "view.movie_explorer" => crate::movie_explorer::open(self),
+                "view.close_document" => crate::tabs::close_active(self),
+                "view.close_all_documents" => crate::tabs::close_all(self),
+                "view.next_document" => crate::tabs::step(self, true),
+                "view.prev_document" => crate::tabs::step(self, false),
                 "view.brush_smaller" => crate::brushtool::resize(self, false),
                 "view.brush_larger" => crate::brushtool::resize(self, true),
                 id if id.starts_with("tool.") => tool = keymap::tool_for(id).or(tool),
@@ -3462,7 +4388,7 @@ impl App {
         if nudge != egui::Vec2::ZERO && crate::onion::editing(self) {
             crate::onion::nudge(self, anicraft_engine::geom::Vec2::new(nudge.x, nudge.y));
         } else if nudge != egui::Vec2::ZERO && !self.s.selection.is_empty() {
-            // One undo step: the move, and raw shapes merging where they land (ADR 0031).
+            // One undo step: the move, with raw shapes left floating where they land (ADR 0122).
             let own = !self.s.in_gesture();
             if own {
                 self.s.begin_gesture(tr_noop!("Move")); // i18n-exempt: an undo label (the engine's English, translated where shown)
@@ -3508,7 +4434,7 @@ impl App {
     }
 
     fn update_title(&mut self, ctx: &egui::Context) {
-        let name = self.s.path.as_ref().and_then(|p| p.file_name()).map_or_else(|| tr!("Untitled").to_string(), |n| n.to_string_lossy().into_owned());
+        let name = crate::tabs::active_name(self);
         let title = format!("AniCraft — {name}{}", if self.s.is_dirty() { " •" } else { "" }); // i18n-exempt: the product name and the file's
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -3521,11 +4447,12 @@ impl App {
         let mut submit = false;
         let mut cancel = false;
         let title = crate::i18n::t(p.title);
-        egui::Window::new(title).id(egui::Id::new(("prompt", p.title))).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, -80.0]).show(ctx, |ui| {
+        crate::windows::new(ctx, title).id(egui::Id::new(("prompt", p.title))).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, -80.0]).show(ctx, |ui| {
             ui.set_min_width(360.0);
             let r = ui.add(egui::TextEdit::singleline(&mut p.text).desired_width(f32::INFINITY)).named(title);
             if p.focus {
-                r.request_focus();
+                // What the prompt offers (a name to change) is selected: typing replaces it.
+                crate::theme::focus_selected(ui, &r, &p.text);
                 p.focus = false;
             }
             if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
@@ -3552,13 +4479,12 @@ impl App {
             }
         } else if cancel {
             self.prompt = None;
-            self.close_after_save = false;
         }
     }
 
     fn about_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_about;
-        let shown = egui::Window::new(tr!("About AniCraft")).id(egui::Id::new("about_window")).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+        let shown = crate::windows::new(ctx, tr!("About AniCraft")).id(egui::Id::new("about_window")).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
             ui.add(egui::Image::new((app_mark(ctx).id(), egui::vec2(64.0, 64.0))));
             ui.heading("AniCraft");
             ui.label(tr!("Version {version} · {stage}", version = env!("CARGO_PKG_VERSION"), stage = crate::i18n::t(RELEASE_STAGE)));
@@ -3590,7 +4516,7 @@ impl App {
             (tr!("Screenshots"), root.join("shots")),
         ];
         let mut opened: Option<Result<(), String>> = None;
-        let shown = egui::Window::new(tr!("Project Files")).id(egui::Id::new("files_window")).open(&mut open).collapsible(false).resizable(false).default_width(620.0).show(ctx, |ui| {
+        let shown = crate::windows::new(ctx, tr!("Project Files")).id(egui::Id::new("files_window")).open(&mut open).collapsible(false).resizable(false).default_width(620.0).show(ctx, |ui| {
             ui.label(theme::text(theme::Type::Label, tr!("Where AniCraft's documents and files are on this computer")));
             ui.add_space(4.0);
             egui::Grid::new("files").num_columns(3).spacing([10.0, 6.0]).striped(true).show(ui, |ui| {
@@ -3762,20 +4688,66 @@ impl eframe::App for App {
         crate::test_movie::remember_place(self);
         // And the floating panels' windows (ADR 0075).
         crate::dock_ui::remember(self);
-        let clean = !self.s.is_dirty() || self.allow_close || self.shot.is_some();
-        self.recovery.finish(&self.s, clean);
+        // Every open document (ADR 0112): unsaved work nobody decided about is kept for the
+        // next start.
+        let clean = self.allow_close || self.shot.is_some();
+        crate::tabs::finish_all(self, clean);
         #[cfg(not(target_arch = "wasm32"))]
         self.updates.finish();
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::remote::finish(self);
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // Stage work on the window's device is submitted only while this frame runs (ADR 0105).
+        let _in_frame = crate::gpu_stage::in_frame(ui.ctx());
+        #[cfg(not(target_arch = "wasm32"))]
+        self.poll_file_dialog();
         self.frame(ui);
         // A few frames drawn: the window started (#207).
         crate::startup::frame();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((id, key, title, name)) = self.file_request.take() {
+            match platform::start_file_dialog(id, &title, &name, frame, ui.ctx().clone()) {
+                Some(answer) => self.file_dialog = Some((id, key, answer)),
+                // No blocking fallback: on macOS that is what crashed.
+                None => {
+                    self.status_err(crate::i18n::t(tr_noop!("The file dialog could not be shown")));
+                }
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::plugin_export_ui::start_browse(self, frame, ui.ctx());
+        #[cfg(target_arch = "wasm32")]
+        let _ = frame;
     }
 }
 
 impl App {
+    /// The file dialog's answer, once given, runs its command (through `request`: it may ask first).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_file_dialog(&mut self) {
+        if let Some((id, key, answer)) = &self.file_dialog {
+            match answer.try_recv() {
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Ok(Some(path)) => {
+                    let (id, key) = (*id, *key);
+                    self.file_dialog = None;
+                    self.request(id, json!({ key: path.display().to_string() }));
+                }
+                Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => self.file_dialog = None,
+            }
+        }
+    }
+
+    /// A file dialog was asked for or is up: a close waits for its Save As (`tabs::tick`).
+    pub(crate) fn file_dialog_open(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.file_request.is_some() || self.file_dialog.is_some();
+        #[cfg(target_arch = "wasm32")]
+        false
+    }
+
     /// One frame of the whole interface. Needs no window, so tests run it headless.
     pub fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
@@ -3787,6 +4759,9 @@ impl App {
             }
         }
         self.handle_screenshot(&ctx);
+        // An assistant's edits (ADR 0104), before anything draws: they show in this frame.
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::remote::poll(self, &ctx);
         self.poll_font_scan(&ctx);
         self.follow_system_look(&ctx);
         if let Some(p) = platform::picked_file() {
@@ -3794,6 +4769,18 @@ impl App {
         }
         // Documents the system handed over while running (macOS: Finder, the Dock; ADR 0062).
         for r in platform::take_requests() {
+            // Not while a file dialog is up (a sheet on macOS, the plug-in Browse… one too): its
+            // answer is for this document, and Quit would close the window under it.
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.file_dialog.is_some() || crate::plugin_export_ui::sheet_pending(self) {
+                platform::push_request(r);
+                continue;
+            }
+            // Nor a document while a question is open (the overwrite one after Save As, say).
+            if self.modal_open() && matches!(r, platform::SystemRequest::Open(_)) {
+                platform::push_request(r);
+                continue;
+            }
             self.system_request(&ctx, r);
         }
         if self.glyph_check {
@@ -3835,7 +4822,9 @@ impl App {
 
         let bar = |fill| egui::Frame::NONE.fill(fill).inner_margin(egui::Margin::symmetric(8, 2));
         crate::drop::begin_frame(self);
-        egui::Panel::top("menu_bar").frame(bar(T.chrome)).show(ui, |ui| menus::bar(self, ui));
+        let menu = egui::Panel::top("menu_bar").frame(bar(T.chrome)).show(ui, |ui| menus::bar(self, ui));
+        // Floating windows stay below the menu bar (crate::windows).
+        crate::windows::set_work_area(&ctx, menu.response.rect.max.y);
         if self.start.is_some() {
             // The start screen takes the workspace's place (ADR 0059); the menus stay.
             egui::Panel::bottom("status_bar").exact_size(28.0).frame(bar(T.chrome)).show(ui, |ui| panels::status_bar(self, ui));
@@ -3850,6 +4839,8 @@ impl App {
     /// and the stage.
     fn workspace(&mut self, ui: &mut egui::Ui) {
         let bar = |fill| egui::Frame::NONE.fill(fill).inner_margin(egui::Margin::symmetric(8, 2));
+        // The open documents' tabs, above the edit bar of the one shown (ADR 0112).
+        egui::Panel::top("document_tabs").exact_size(crate::tabs::BAR_HEIGHT).frame(egui::Frame::NONE.fill(T.chrome)).show(ui, |ui| crate::tabs::bar(self, ui));
         egui::Panel::top("edit_bar").exact_size(theme::TARGET + 8.0).frame(bar(T.panel)).show(ui, |ui| panels::edit_bar(self, ui));
         egui::Panel::bottom("status_bar").exact_size(28.0).frame(bar(T.chrome)).show(ui, |ui| panels::status_bar(self, ui));
         crate::dock_ui::workspace(self, ui);
@@ -3861,6 +4852,9 @@ impl App {
         crate::drop::frame(self, &ctx);
         self.prompt_window(&ctx);
         crate::convert_symbol::window(self, &ctx);
+        crate::shape_dialogs::window(self, &ctx);
+        crate::trace_dialog::window(self, &ctx);
+        crate::doc_settings::window(self, &ctx);
         crate::aids_dialog::window(self, &ctx);
         crate::templates::save_window(self, &ctx);
         crate::layer_props::window(self, &ctx);
@@ -3869,6 +4863,8 @@ impl App {
         autosave::window(self, &ctx);
         crate::desktop_ui::offer(self, &ctx);
         crate::plugins_ui::show(self, &ctx);
+        crate::audio_keys::show(self, &ctx);
+        crate::data_ui::show(self, &ctx);
         crate::plugin_export_ui::show(self, &ctx);
         crate::dock_float::floating(self, &ctx);
         crate::workspaces_window::show(self, &ctx);
@@ -3876,27 +4872,27 @@ impl App {
         crate::find_panel::show(self, &ctx);
         crate::brush_panel::show(self, &ctx);
         crate::publish_panel::show(self, &ctx);
+        crate::video_import::window(self, &ctx);
         crate::test_movie::show(self, &ctx);
         crate::envelope::show(self, &ctx);
         crate::ease_editor::show(self, &ctx);
+        // Everything is painted: text no interface font could draw gets a fallback (#482).
+        crate::font_fallback::tick(self, &ctx);
 
-        // Never lose work on close: intercept it while there are unsaved changes.
-        if self.allow_close {
-            if self.close_after_save || self.close_dialog {
-                self.close_after_save = false;
-                self.close_dialog = false;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-        } else if ctx.input(|i| i.viewport().close_requested()) && self.shot.is_none() && self.s.is_dirty() {
+        // Never lose work on close: intercept it while any open document has unsaved changes,
+        // and ask once for all of them (ADR 0004, ADR 0112).
+        if !self.allow_close && ctx.input(|i| i.viewport().close_requested()) && self.shot.is_none() && crate::tabs::any_dirty(self) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.playing = false;
-            self.close_dialog = true;
+            crate::tabs::quit(self);
         }
+        // Closing tabs, or the window: the next step once a question is answered or a save done.
+        crate::tabs::tick(self, &ctx);
         self.files_window(&ctx);
 
         // Close a coalesced edit (property drags) once nothing is being dragged or typed.
-        // (A plug-in dialog keeps its preview gesture open until OK or Cancel.)
-        if self.s.in_gesture() && self.plugin_dialog.is_none() && self.drag == Drag::None && !ctx.egui_is_using_pointer() && ctx.memory(|m| m.focused().is_none()) {
+        // (A plug-in dialog and Convert Audio to Keyframes keep their preview gesture open
+        // until OK or Cancel.)
+        if self.s.in_gesture() && self.plugin_dialog.is_none() && self.audio_keys.is_none() && self.drag == Drag::None && !ctx.egui_is_using_pointer() && ctx.memory(|m| m.focused().is_none()) {
             self.s.end_gesture();
         }
 
@@ -3912,8 +4908,16 @@ impl App {
         crate::brush_panel::sync(self);
         crate::panels::sync_filter_presets(self);
         crate::rulers::sync(self);
+        let pointer_down = ctx.input(|i| i.pointer.any_down());
+        crate::brushtool::sync(self, pointer_down);
         // A browser asks before leaving a page with unsaved work (its close guard).
-        platform::set_unsaved(self.s.is_dirty());
+        platform::set_unsaved(crate::tabs::any_dirty(self));
+        // Copied artwork or frames: the system clipboard says so, as any copy replaces what it
+        // held, and so the next Ctrl/⌘+V comes through (issue #197). A browser sends that key
+        // press whatever its clipboard holds.
+        if std::mem::take(&mut self.copied) && !platform::WEB {
+            ctx.copy_text(tr!("Copied from AniCraft").to_string());
+        }
 
         // An edit late in this frame (after the stage drew) must be shown without waiting for
         // the next input event: egui only repaints on demand. This was the "drag commits after a
@@ -3922,6 +4926,179 @@ impl App {
             self.last_revision = self.s.revision;
             ctx.request_repaint();
         }
+    }
+}
+
+/// On the desktop egui-winit turns Ctrl/⌘+X, C and V (and Shift+Delete, Ctrl+Insert and
+/// Shift+Insert on Windows) into `Event::Cut`, `Event::Copy` and `Event::Paste` instead of key
+/// presses, so the keymap never saw them (issue #197). Outside a text field they are shortcuts
+/// like any other: each becomes its key press again, with the modifiers held (Ctrl+Shift+V is
+/// Paste in Place), and the keymap decides what it runs. The events stay for egui.
+fn clipboard_keys_as_presses(i: &mut egui::InputState) {
+    // Without Ctrl/⌘ it was Shift+Delete, Ctrl+Insert, Shift+Insert or a Cut/Copy/Paste key.
+    let modifiers = if i.modifiers.command { i.modifiers } else { Modifiers::COMMAND };
+    let keys: Vec<Key> = i
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            egui::Event::Cut => Some(Key::X),
+            egui::Event::Copy => Some(Key::C),
+            egui::Event::Paste(_) => Some(Key::V),
+            _ => None,
+        })
+        .collect();
+    i.events.extend(keys.into_iter().map(|key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }));
+}
+
+/// #263: a picture copied in another app pastes as a bitmap.
+#[cfg(test)]
+mod system_paste_tests {
+    use super::App;
+    use crate::platform::{ClipboardImage, SwallowedPaste};
+    use egui::{Event, Key, Modifiers, RawInput};
+
+    /// The picture lands in the middle of the view, selected, with its bitmap in the Library;
+    /// one undo takes both away.
+    #[test]
+    fn a_copied_picture_pastes_as_a_bitmap_in_the_middle_of_the_view() {
+        let ctx = egui::Context::default();
+        let mut app = App::with_context(&ctx, anicraft_engine::Session::default(), Some(std::path::PathBuf::from("unused.png")));
+        assert!(!app.system_clipboard, "tests never read this computer's clipboard");
+        assert!(!app.paste_from_system());
+        let before = app.s.doc.clone();
+        let image = ClipboardImage { width: 40, height: 20, rgba: [10, 200, 30, 255].repeat(800) };
+        app.paste_image(&image);
+        assert_eq!(app.s.doc.bitmaps.len(), 1);
+        assert_eq!(app.s.doc.bitmaps.first().map(|b| (b.width, b.height)), Some((40, 20)));
+        assert_eq!(app.s.selection.len(), 1, "the pasted picture is selected");
+        let (b, c) = (app.s.selection_bounds(), app.view_center_stage());
+        assert!((b.width() - 40.0).abs() < 0.01 && (b.height() - 20.0).abs() < 0.01, "{b:?}");
+        assert!((b.center().x - c.x).abs() < 0.51 && (b.center().y - c.y).abs() < 0.51, "centred on the view: {b:?} vs {c:?}");
+        assert!(app.status.as_ref().is_some_and(|s| !s.error), "{:?}", app.status.as_ref().map(|s| &s.text));
+        app.run("edit.undo", serde_json::json!({}));
+        assert!(app.s.doc == before, "one undo");
+    }
+
+    /// With a picture on the clipboard, Ctrl+V reaches the app only as the release of V. That
+    /// is a paste; a V that was pressed (the Selection tool's key) or pasted as text is not.
+    #[test]
+    fn a_release_of_v_with_nothing_before_it_is_a_swallowed_paste() {
+        let ctx = egui::Context::default();
+        let key = |pressed, modifiers| Event::Key { key: Key::V, physical_key: None, pressed, repeat: false, modifiers };
+        let feed = |state: &mut SwallowedPaste, time: f64, modifiers: Modifiers, events: Vec<Event>| {
+            let mut all = vec![Event::ModifiersChanged(modifiers)];
+            all.extend(events);
+            let mut heard = false;
+            ctx.run_ui(RawInput { time: Some(time), events: all, ..Default::default() }, |ui| heard = ui.input(|i| state.frame(i))).textures_delta.clear();
+            heard
+        };
+        let (ctrl, none) = (Modifiers::COMMAND | Modifiers::CTRL, Modifiers::NONE);
+        // Ctrl down, (the press of V is swallowed), V up.
+        let mut state = SwallowedPaste::default();
+        assert!(!feed(&mut state, 1.0, ctrl, vec![]));
+        assert!(feed(&mut state, 1.1, ctrl, vec![key(false, ctrl)]));
+        // Ctrl let go first, V a moment later: still that paste. Much later: not.
+        assert!(!feed(&mut state, 2.0, ctrl, vec![]));
+        assert!(feed(&mut state, 2.2, none, vec![key(false, none)]));
+        assert!(!feed(&mut state, 9.0, none, vec![key(false, none)]));
+        // Text on the clipboard: the paste event came, so the release is just a release.
+        assert!(!feed(&mut state, 10.0, ctrl, vec![Event::Paste("text".into())]));
+        assert!(!feed(&mut state, 10.1, ctrl, vec![key(false, ctrl)]));
+        // The V key by itself (the Selection tool).
+        assert!(!feed(&mut state, 11.0, none, vec![key(true, none)]));
+        assert!(!feed(&mut state, 11.1, none, vec![key(false, none)]));
+    }
+}
+
+/// Ctrl/⌘+X, C and V on the stage (issue #197). On the desktop egui-winit hands them over as
+/// `Event::Cut`, `Event::Copy` and `Event::Paste`, never as key presses, so these tests send
+/// exactly that.
+#[cfg(test)]
+mod clipboard_key_tests {
+    use super::App;
+    use egui::{Event, Modifiers, RawInput, Rect, pos2, vec2};
+
+    fn app() -> (egui::Context, App) {
+        let ctx = egui::Context::default();
+        let session = anicraft_engine::Session::new(anicraft_engine::doc::sample::demo());
+        let app = App::with_context(&ctx, session, Some(std::path::PathBuf::from("unused.png")));
+        (ctx, app)
+    }
+
+    /// The keys held (as egui-winit reports them, first) and the events of one frame.
+    fn input(modifiers: Modifiers, events: Vec<Event>) -> RawInput {
+        let events = std::iter::once(Event::ModifiersChanged(modifiers)).chain(events).collect();
+        RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1600.0, 940.0))), events, ..Default::default() }
+    }
+
+    /// One frame; what it asked the system clipboard to hold.
+    fn frame(ctx: &egui::Context, app: &mut App, input: RawInput) -> Vec<String> {
+        let mut out = ctx.run_ui(input, |ui| app.frame(ui));
+        out.textures_delta.clear();
+        out.platform_output.commands.into_iter().filter_map(|c| if let egui::OutputCommand::CopyText(t) = c { Some(t) } else { None }).collect()
+    }
+
+    /// Elements on the playhead's frame, every layer.
+    fn elements(app: &App) -> usize {
+        app.s.timeline().layers.iter().filter_map(|l| l.keyframe_at(app.s.frame)).map(|k| k.elements.len()).sum()
+    }
+
+    fn ctrl() -> Modifiers {
+        Modifiers::CTRL | Modifiers::COMMAND
+    }
+
+    #[test]
+    fn ctrl_c_x_and_v_copy_cut_and_paste_the_selected_artwork() {
+        let (ctx, mut app) = app();
+        for _ in 0..3 {
+            frame(&ctx, &mut app, input(Modifiers::NONE, vec![]));
+        }
+        app.run("edit.select_all", serde_json::json!({}));
+        assert!(!app.s.selection.is_empty(), "the sample has artwork to select");
+        let before = elements(&app);
+        // Ctrl+C copies, and puts something on the system clipboard, so the next Ctrl+V
+        // reaches the app even when the clipboard held no text before.
+        let copied = frame(&ctx, &mut app, input(ctrl(), vec![Event::Copy]));
+        assert!(!app.s.clipboard.is_empty(), "Ctrl+C copied the selection");
+        assert!(copied.iter().any(|t| !t.is_empty()), "the system clipboard holds text: {copied:?}");
+        assert_eq!(elements(&app), before, "copying changes nothing");
+        // Ctrl+V pastes a copy (whatever text the system clipboard holds).
+        let steps = app.s.history().undo_len();
+        frame(&ctx, &mut app, input(ctrl(), vec![Event::Paste("AniCraft artwork".into())]));
+        assert!(elements(&app) > before, "Ctrl+V pasted the artwork");
+        assert_eq!(app.s.history().undo_len(), steps + 1, "one undo step");
+        // Ctrl+Shift+V is Paste in Place.
+        let pasted = elements(&app);
+        frame(&ctx, &mut app, input(ctrl() | Modifiers::SHIFT, vec![Event::Paste("AniCraft artwork".into())]));
+        assert!(elements(&app) > pasted, "Ctrl+Shift+V pasted in place");
+        // Ctrl+X cuts what is selected (the pasted copy).
+        let now = elements(&app);
+        frame(&ctx, &mut app, input(ctrl(), vec![Event::Cut]));
+        assert!(elements(&app) < now, "Ctrl+X cut the selection");
+    }
+
+    #[test]
+    fn a_text_field_keeps_its_own_copy_and_paste() {
+        let (ctx, mut app) = app();
+        let mut text = String::new();
+        let run = |app: &mut App, text: &mut String, input: RawInput| {
+            let mut out = ctx.run_ui(input, |ui| {
+                ui.text_edit_singleline(text).request_focus();
+                app.frame(ui);
+            });
+            out.textures_delta.clear();
+        };
+        for _ in 0..3 {
+            run(&mut app, &mut text, input(Modifiers::NONE, vec![]));
+        }
+        assert!(ctx.text_edit_focused(), "the field has the keyboard");
+        app.run("edit.select_all", serde_json::json!({}));
+        let before = elements(&app);
+        run(&mut app, &mut text, input(ctrl(), vec![Event::Copy]));
+        assert!(app.s.clipboard.is_empty(), "Ctrl+C in a text field does not copy artwork");
+        run(&mut app, &mut text, input(ctrl(), vec![Event::Paste("hello".into())]));
+        assert_eq!(text, "hello", "the field took the paste");
+        assert_eq!(elements(&app), before, "and the stage did not");
     }
 }
 
@@ -3966,5 +5143,144 @@ mod prompt_enter_tests {
         ctx.run_ui(input(vec![enter]), |_| app.prompt_window(&ctx)).textures_delta.clear();
         assert!(app.prompt.is_none(), "Enter closes the rename prompt");
         assert_eq!(app.s.active_layer().unwrap().name, "Renamed");
+    }
+
+    #[test]
+    fn opening_rename_layer_selects_entire_name() {
+        let ctx = egui::Context::default();
+
+        // Start with a genuine new AniCraft document.
+        let document = anicraft_engine::doc::Document::default();
+        let session = anicraft_engine::Session::new(document);
+        let mut app = App::with_context(&ctx, session, Some(std::path::PathBuf::from("unused.png")));
+
+        // Check the initial document.
+        let original = app.s.active_layer().expect("A new document should have an active layer").name.clone();
+
+        assert_eq!(original, "Layer 1");
+
+        // Invoke AniCraft's REAL Rename Layer command.
+        app.invoke("layer.rename");
+
+        // Verify that the command created the correct prompt.
+        let prompt = app.prompt.as_ref().expect("Rename Layer should open a prompt");
+
+        assert_eq!(prompt.cmd, "layer.rename");
+        assert_eq!(prompt.text, original);
+        assert!(prompt.focus);
+
+        // Simulate three frames of the dialog.
+        for _ in 0..3 {
+            let input =
+                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 940.0))), ..Default::default() };
+
+            ctx.run_ui(input, |_| app.prompt_window(&ctx)).textures_delta.clear();
+        }
+
+        // Find the text field that received keyboard focus.
+        let id = ctx.memory(|m| m.focused()).expect("The name field should have focus");
+
+        // Inspect the actual text selection.
+        let state = egui::TextEdit::load_state(&ctx, id).expect("The text field should have editing state");
+
+        let selection = state.cursor.char_range().expect("The name field should have a selection");
+
+        let a = selection.primary.index;
+        let b = selection.secondary.index;
+
+        // The entire original name must be selected.
+        assert_eq!(a.min(b), egui::text::CharIndex(0));
+        assert_eq!(a.max(b), egui::text::CharIndex(original.chars().count()));
+    }
+
+    #[test]
+    fn opening_rename_scene_selects_entire_name() {
+        let ctx = egui::Context::default();
+
+        // Create a real new AniCraft document.
+        let document = anicraft_engine::doc::Document::default();
+        let session = anicraft_engine::Session::new(document);
+        let mut app = App::with_context(&ctx, session, Some(std::path::PathBuf::from("unused.png")));
+
+        // Get the actual name of the current scene.
+        let original = app.s.doc.scenes.get(app.s.scene).expect("A new document should have a scene").name.clone();
+
+        assert!(!original.is_empty());
+
+        // Invoke the real Rename Scene command.
+        app.invoke("scene.rename");
+
+        // Verify that AniCraft created the correct prompt.
+        let prompt = app.prompt.as_ref().expect("Rename Scene should open a prompt");
+
+        assert_eq!(prompt.cmd, "scene.rename");
+        assert_eq!(prompt.text, original);
+        assert!(prompt.focus);
+
+        // Simulate three frames of the dialog.
+        for _ in 0..3 {
+            let input =
+                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 940.0))), ..Default::default() };
+
+            ctx.run_ui(input, |_| app.prompt_window(&ctx)).textures_delta.clear();
+        }
+
+        // Get the focused text field's editing state.
+        let id = ctx.memory(|m| m.focused()).expect("The scene name field should have focus");
+
+        let state = egui::TextEdit::load_state(&ctx, id).expect("The text field should have editing state");
+
+        let selection = state.cursor.char_range().expect("The scene name should have a selection");
+
+        let a = selection.primary.index;
+        let b = selection.secondary.index;
+
+        // The entire original scene name must be selected.
+        assert_eq!(a.min(b), egui::text::CharIndex(0));
+        assert_eq!(a.max(b), egui::text::CharIndex(original.chars().count()));
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod file_dialog_tests {
+    use super::*;
+
+    /// A document the system hands over while a file dialog is up waits for its answer and the
+    /// overwrite question after it, so a Save As saves the document that asked, not the one
+    /// opened meanwhile.
+    #[test]
+    fn system_open_waits_for_the_file_dialog() {
+        let dir = std::env::temp_dir().join(format!("anicraft-shell-dialog-open-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (other, existing) = (dir.join("other.anicraft"), dir.join("existing.anicraft"));
+        let mut s = anicraft_engine::Session::new(anicraft_engine::doc::sample::demo());
+        s.execute("file.save", &json!({"path": other.display().to_string()})).unwrap();
+        s.execute("file.save", &json!({"path": existing.display().to_string()})).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::with_context(&ctx, anicraft_engine::Session::new(anicraft_engine::doc::sample::demo()), Some(PathBuf::from("unused.png")));
+        let frame = |app: &mut App| {
+            let input =
+                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 940.0))), ..Default::default() };
+            ctx.run_ui(input, |ui| app.frame(ui)).textures_delta.clear();
+        };
+        let (answer, rx) = std::sync::mpsc::channel();
+        app.file_dialog = Some(("file.save_as", "path", rx));
+        platform::push_request(platform::SystemRequest::Open(vec![other.clone()]));
+        frame(&mut app);
+        assert_eq!(app.s.path, None, "nothing opens while the dialog is up");
+        // The answer is a file that exists: Replace? is asked, and the open still waits.
+        answer.send(Some(existing.clone())).unwrap();
+        app.poll_file_dialog();
+        frame(&mut app);
+        assert_eq!(app.s.path, None, "nothing opens while the overwrite question is open");
+        // Replace, as the confirmation's button does.
+        let p = app.confirm.take().expect("the overwrite question");
+        let mut params = p.params;
+        params["confirm"] = json!(true);
+        app.perform(&p.id, params);
+        assert_eq!(app.s.path.as_deref(), Some(existing.as_path()), "Save As saved the document that asked");
+        frame(&mut app);
+        assert_eq!(app.s.path.as_deref(), Some(other.as_path()), "it opens once the question is answered");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

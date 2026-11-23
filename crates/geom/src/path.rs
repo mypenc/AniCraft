@@ -40,7 +40,9 @@ impl Path {
         use std::fmt::Write;
         let mut s = String::with_capacity(self.cmds.len() * 16);
         let pt = |s: &mut String, p: Vec2| {
-            let _ = write!(s, "{} {}", p.x, p.y);
+            // Non-finite values would be rejected by `from_svg`; write 0 so a save always reloads.
+            let f = |v: f32| if v.is_finite() { v } else { 0.0 };
+            let _ = write!(s, "{} {}", f(p.x), f(p.y));
         };
         for c in &self.cmds {
             match *c {
@@ -79,7 +81,8 @@ impl Path {
         let mut it = src.char_indices().peekable();
         let mut nums: Vec<f32> = Vec::with_capacity(6);
         let mut cur: Option<char> = None;
-        let flush = |cur: Option<char>, nums: &mut Vec<f32>, cmds: &mut Vec<PathCmd>| -> Result<(), String> {
+        let mut emitted = false;
+        let flush = |cur: Option<char>, nums: &mut Vec<f32>, cmds: &mut Vec<PathCmd>, emitted: bool| -> Result<(), String> {
             let Some(c) = cur else {
                 return if nums.is_empty() { Ok(()) } else { Err("number before the first command".into()) };
             };
@@ -96,14 +99,18 @@ impl Path {
                 cmds.push(PathCmd::Close);
                 return Ok(());
             }
+            // A streamed batch already supplied this command's operands.
+            if nums.is_empty() && emitted {
+                return Ok(());
+            }
             if nums.is_empty() || !nums.len().is_multiple_of(need) {
                 return Err(format!("{c} needs a multiple of {need} numbers, got {}", nums.len()));
             }
-            for g in nums.chunks(need) {
+            for (index, g) in nums.chunks(need).enumerate() {
                 let v = |i: usize| Vec2::new(g[i], g[i + 1]);
                 cmds.push(match c {
-                    'M' => PathCmd::MoveTo(v(0)),
-                    'L' => PathCmd::LineTo(v(0)),
+                    'M' if !emitted && index == 0 => PathCmd::MoveTo(v(0)),
+                    'M' | 'L' => PathCmd::LineTo(v(0)),
                     'Q' => PathCmd::QuadTo(v(0), v(2)),
                     _ => PathCmd::CubicTo(v(0), v(2), v(4)),
                 });
@@ -117,8 +124,9 @@ impl Path {
         while let Some(&(i, ch)) = it.peek() {
             match ch {
                 'M' | 'L' | 'Q' | 'C' | 'Z' | 'z' => {
-                    flush(cur, &mut nums, &mut cmds)?;
+                    flush(cur, &mut nums, &mut cmds, emitted)?;
                     cur = Some(ch.to_ascii_uppercase());
+                    emitted = false;
                     it.next();
                 }
                 ' ' | ',' | '\n' | '\t' | '\r' => {
@@ -153,14 +161,15 @@ impl Path {
                             _ => return Err("Z takes no numbers".into()),
                         };
                         if nums.len().is_multiple_of(need) {
-                            flush(cur, &mut nums, &mut cmds)?;
+                            flush(cur, &mut nums, &mut cmds, emitted)?;
+                            emitted = true;
                         }
                     }
                 }
                 other => return Err(format!("unexpected character '{other}' in path data")),
             }
         }
-        flush(cur, &mut nums, &mut cmds)?;
+        flush(cur, &mut nums, &mut cmds, emitted)?;
         Ok(Path { cmds })
     }
 }
@@ -276,7 +285,9 @@ impl Path {
             return Path::rect(x, y, w, h);
         }
         let k = r * (1.0 - KAPPA);
-        let (x1, y1) = (x + w, y + h);
+        // Normalise negative sizes by swapping the corners.
+        let (x, x1) = if w < 0.0 { (x + w, x) } else { (x, x + w) };
+        let (y, y1) = if h < 0.0 { (y + h, y) } else { (y, y + h) };
         let mut p = Path::new();
         p.move_to(Vec2::new(x + r, y))
             .line_to(Vec2::new(x1 - r, y))
@@ -301,6 +312,28 @@ impl Path {
             .cubic_to(Vec2::new(cx - rx, cy - ky), Vec2::new(cx - kx, cy - ry), Vec2::new(cx, cy - ry))
             .cubic_to(Vec2::new(cx + kx, cy - ry), Vec2::new(cx + rx, cy - ky), Vec2::new(cx + rx, cy))
             .close();
+        p
+    }
+
+    /// Ellipse centred at `(cx, cy)` built from eight cubic arcs (a node every 45 degrees,
+    /// starting at the right), as the Oval tool draws it.
+    pub fn ellipse8(cx: f32, cy: f32, rx: f32, ry: f32) -> Path {
+        // Control-arm length for a 45 degree arc: 4/3 * tan(pi / 16).
+        const K: f32 = 0.265_216_5;
+        const STEP: f32 = std::f32::consts::FRAC_PI_4;
+        let mut p = Path::new();
+        p.move_to(Vec2::new(cx + rx, cy));
+        for i in 0..8 {
+            let (s0, c0) = (i as f32 * STEP).sin_cos();
+            let (s1, c1) = ((i + 1) as f32 * STEP).sin_cos();
+            let end = if i == 7 { Vec2::new(cx + rx, cy) } else { Vec2::new(cx + rx * c1, cy + ry * s1) };
+            p.cubic_to(
+                Vec2::new(cx + rx * (c0 - K * s0), cy + ry * (s0 + K * c0)),
+                Vec2::new(cx + rx * (c1 + K * s1), cy + ry * (s1 - K * c1)),
+                end,
+            );
+        }
+        p.close();
         p
     }
 
@@ -611,6 +644,33 @@ mod tests {
     }
 
     #[test]
+    fn rounded_rect_negative_size_matches_rect_bounds() {
+        for (w, h) in [(-10.0, 10.0), (10.0, -10.0), (-10.0, -10.0)] {
+            let b = Path::rounded_rect(0.0, 0.0, w, h, 2.0).bounds();
+            let e = Path::rect(0.0, 0.0, w, h).bounds();
+            assert_eq!((b.min, b.max), (e.min, e.max), "w={w} h={h}");
+        }
+    }
+
+    #[test]
+    fn non_finite_coordinates_round_trip_as_zero() {
+        let mut p = Path::default();
+        p.cmds.push(PathCmd::MoveTo(Vec2::new(0.0, 0.0)));
+        p.cmds.push(PathCmd::LineTo(Vec2::new(f32::INFINITY, 1.0)));
+        p.cmds.push(PathCmd::LineTo(Vec2::new(f32::NAN, f32::NEG_INFINITY)));
+        let json = serde_json::to_string(&p).unwrap();
+        let back: Path = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.cmds,
+            vec![
+                PathCmd::MoveTo(Vec2::new(0.0, 0.0)),
+                PathCmd::LineTo(Vec2::new(0.0, 1.0)),
+                PathCmd::LineTo(Vec2::new(0.0, 0.0)),
+            ]
+        );
+    }
+
+    #[test]
     fn flatten_rect_is_closed_polygon() {
         let pls = Path::rect(0.0, 0.0, 10.0, 5.0).flatten(&Affine::IDENTITY, 0.1);
         assert_eq!(pls.len(), 1);
@@ -656,6 +716,58 @@ mod tests {
         let s = p.to_svg();
         assert_eq!(Path::from_svg(&s).unwrap(), p);
         assert!(s.starts_with('M'));
+    }
+
+    #[test]
+    fn svg_implicit_commands_survive_streaming_batches() {
+        for (command, group, counts) in [('L', "1 0", [4, 8, 5]), ('Q', "1 1 2 0", [2, 4, 3]), ('C', "1 1 2 1 3 0", [2, 4, 3])] {
+            for count in counts {
+                let operands = std::iter::repeat_n(group, count).collect::<Vec<_>>().join(" ");
+                let implicit = format!("M0 0{command}{operands}");
+                let explicit = format!("M0 0{}", format!("{command}{group}").repeat(count));
+                for suffix in ["", "Z", "L9 9"] {
+                    assert_eq!(
+                        Path::from_svg(&format!("{implicit}{suffix}")).unwrap(),
+                        Path::from_svg(&format!("{explicit}{suffix}")).unwrap(),
+                        "{implicit} with suffix {suffix:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn svg_moveto_repeats_become_lines_across_streaming_batches() {
+        for count in [2, 4, 8, 5, 9] {
+            let points: Vec<_> = (0..count).map(|i| format!("{i} {}", i * 2)).collect();
+            let implicit = format!("M{}", points.join(" "));
+            let explicit = format!("M0 0L{}", points[1..].join("L"));
+            for (suffix, explicit_suffix) in [
+                ("", ""),
+                ("Z", "Z"),
+                ("M20 20 30 30", "M20 20L30 30"),
+                ("ZM20 20 30 30", "ZM20 20L30 30"),
+                ("L40 40M50 50 60 60", "L40 40M50 50L60 60"),
+            ] {
+                assert_eq!(
+                    Path::from_svg(&format!("{implicit}{suffix}")).unwrap(),
+                    Path::from_svg(&format!("{explicit}{explicit_suffix}")).unwrap(),
+                    "{implicit} with suffix {suffix:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn svg_streaming_batches_still_reject_incomplete_commands() {
+        for (command, complete) in
+            [('M', "M0 0 1 0 2 0 3 0"), ('L', "M0 0L1 0 2 0 3 0 4 0"), ('Q', "M0 0Q1 1 2 0 3 1 4 0"), ('C', "M0 0C1 1 2 1 3 0 4 1 5 1 6 0")]
+        {
+            let different = if command == 'L' { 'Q' } else { 'L' };
+            for invalid in [format!("M0 0{command}"), format!("{complete}{command}"), format!("{complete}{different}"), format!("{complete} 9")] {
+                assert!(Path::from_svg(&invalid).is_err(), "{invalid}");
+            }
+        }
     }
 
     #[test]

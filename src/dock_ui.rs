@@ -201,6 +201,7 @@ impl App {
     /// Brings a panel forward, reopening it where it was if it was closed; in a dock collapsed
     /// to icons it opens over the stage.
     pub fn show_panel(&mut self, p: Panel) {
+        self.unhide_panels();
         if !self.dock.is_shown(p) {
             self.dock.show(p);
             self.dock_changed();
@@ -212,6 +213,11 @@ impl App {
 
     /// The Window menu's items: close a panel on screen, bring any other forward.
     pub fn toggle_panel(&mut self, p: Panel) {
+        // Asked for while the panels are hidden: they all come back, with this one in front.
+        if self.unhide_panels() {
+            self.show_panel(p);
+            return;
+        }
         if !self.panel_visible(p) && self.dock.is_open(p) {
             self.show_panel(p);
             return;
@@ -226,6 +232,52 @@ impl App {
         self.dock_changed();
     }
 
+    /// A panel's Window menu item, and its key (#456): closes the panel when it is in front,
+    /// brings it forward otherwise.
+    pub fn window_menu_panel(&mut self, p: Panel) {
+        if p == Panel::MovieExplorer && !self.panel_visible(p) {
+            crate::movie_explorer::open(self);
+        } else {
+            self.toggle_panel(p);
+        }
+    }
+
+    /// Window › Hide Panels (F4, as in Animate; #456): every panel closes and the stage takes
+    /// the window; the same key brings them back exactly as they were. The hidden state is for
+    /// now only: it is never what a workspace remembers, so a restart shows the panels.
+    pub fn toggle_hide_panels(&mut self) {
+        if self.unhide_panels() {
+            return;
+        }
+        let open: Vec<Panel> = Panel::ALL.into_iter().filter(|p| self.dock.is_open(*p)).collect();
+        if open.is_empty() {
+            return;
+        }
+        self.hidden_panels = Some(self.dock.clone());
+        for p in open {
+            self.dock.close(p);
+        }
+        self.dock_view.epoch += 1;
+        self.dock_view.placed.clear();
+        self.dock_view.flyout = None;
+        let key = self.keymap.primary("view.hide_panels").map(crate::platform::shortcut_label);
+        self.status_ok(match key {
+            Some(k) => tr!("Panels hidden: {key} brings them back", key = k),
+            None => tr!("Panels hidden: Window › Show Panels brings them back").to_string(),
+        });
+    }
+
+    /// Brings back the panels Hide Panels hid. True when there were any.
+    pub fn unhide_panels(&mut self) -> bool {
+        match self.hidden_panels.take() {
+            Some(l) => {
+                self.set_layout(l);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Keeps the arrangement as the current workspace's, to be saved.
     pub fn dock_changed(&mut self) {
         self.prefs.workspaces.keep(&self.dock);
@@ -234,6 +286,7 @@ impl App {
 
     /// Window › Workspace: switches to a workspace, as it was last arranged.
     pub fn switch_workspace(&mut self, key: &str) {
+        self.unhide_panels();
         self.prefs.workspaces.keep(&self.dock);
         if let Some(l) = self.prefs.workspaces.switch(key) {
             self.set_layout(l);
@@ -242,6 +295,7 @@ impl App {
 
     /// Window › Workspace › Reset: the current workspace as built or saved.
     pub fn reset_workspace(&mut self) {
+        self.hidden_panels = None;
         let l = self.prefs.workspaces.reset();
         self.set_layout(l);
         let name = crate::i18n::t_dyn(crate::dock::Workspaces::name(&self.prefs.workspaces.current)).into_owned();
@@ -565,7 +619,7 @@ fn band_header(ui: &mut egui::Ui, side: Side, g: &Group, rect: Rect, first_group
     p.rect_filled(rect, theme::SQUARE, T.panel_alt);
     p.line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, T.border));
     p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, T.border));
-    p.rect_filled(Rect::from_min_size(rect.left_top() + vec2(0.0, 1.0), vec2(3.0, rect.height() - 1.0)), theme::SQUARE, T.accent);
+    crate::theme::accent_bar(&p, Rect::from_min_size(rect.left_top() + vec2(0.0, 1.0), vec2(3.0, rect.height() - 1.0)));
     // Fold: the group keeps only its header, giving the others its room.
     let chevron = Rect::from_center_size(pos2(rect.left() + 17.0, rect.center().y), vec2(22.0, 22.0));
     let resp = ui.interact(chevron, Id::new(("dock_fold", shown.id())), Sense::click());
@@ -759,7 +813,7 @@ fn tab_widget(ui: &mut egui::Ui, tab: Panel, r: Rect, shown: Rect, active: bool,
     // Drawn inside the strip only: never over the buttons.
     p.galley_with_override_text_color(pos2(r.left() + TAB_PAD * 0.5, r.center().y - galley.rect.height() * 0.5), galley.clone(), colour);
     if active && several {
-        p.rect_filled(Rect::from_min_max(pos2(r.left() + 6.0, r.bottom() - 2.0), pos2(r.right() - 6.0, r.bottom())), theme::SQUARE, T.accent);
+        crate::theme::accent_bar(&p, Rect::from_min_max(pos2(r.left() + 6.0, r.bottom() - 2.0), pos2(r.right() - 6.0, r.bottom())));
     }
     if resp.has_focus() {
         p.rect_stroke(r, T.rc(), Stroke::new(2.0, T.accent), StrokeKind::Inside);
@@ -1065,7 +1119,7 @@ fn flyout(app: &mut App, ctx: &egui::Context, auto: (f32, f32), layout: &Layout,
         ui.painter().rect_stroke(rect, theme::SQUARE, Stroke::new(1.0, T.border), StrokeKind::Inside);
         let header = Rect::from_min_size(rect.min, vec2(rect.width(), BAND_H));
         ui.painter().rect_filled(header, theme::SQUARE, T.panel_alt);
-        ui.painter().rect_filled(Rect::from_min_size(header.left_top(), vec2(3.0, header.height())), theme::SQUARE, T.accent);
+        crate::theme::accent_bar(ui.painter(), Rect::from_min_size(header.left_top(), vec2(3.0, header.height())));
         let title = crate::i18n::t(p.label());
         let galley = ui.painter().layout_no_wrap(title.to_string(), font(Type::Heading), theme::color(Type::Heading));
         let tr = Rect::from_min_max(header.min + vec2(12.0, 0.0), pos2(header.right() - 2.0 * MENU_W - 6.0, header.bottom()));
@@ -1370,6 +1424,46 @@ mod tests {
         ctx.run_ui(input(events), |ui| app.frame(ui)).textures_delta.clear();
     }
 
+    /// #456: every panel opens and closes from the keyboard, and F4 hides them all and brings
+    /// them back as they were, without the hidden state becoming the workspace's.
+    #[test]
+    fn panels_toggle_from_the_keyboard_and_f4_hides_them_all() {
+        use egui::{Key, Modifiers};
+        let (mut app, ctx) = app();
+        settle(&ctx, &mut app);
+        let press = |ctx: &egui::Context, app: &mut App, key: Key, modifiers: Modifiers| {
+            frame(ctx, app, vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }]);
+            settle(ctx, app);
+        };
+        let ctrl = Modifiers::COMMAND;
+        assert!(app.panel_visible(Panel::Library) && app.panel_visible(Panel::Timeline));
+        press(&ctx, &mut app, Key::L, ctrl);
+        assert!(!app.dock.is_open(Panel::Library), "Ctrl+L closes the Library");
+        press(&ctx, &mut app, Key::L, ctrl);
+        assert!(app.panel_visible(Panel::Library), "and opens it again where it was");
+        press(&ctx, &mut app, Key::T, ctrl | Modifiers::ALT);
+        assert!(!app.dock.is_open(Panel::Timeline));
+        press(&ctx, &mut app, Key::T, ctrl | Modifiers::ALT);
+        assert!(app.panel_visible(Panel::Timeline));
+
+        let before = app.dock.clone();
+        let kept = app.prefs.workspaces.layout();
+        press(&ctx, &mut app, Key::F4, Modifiers::NONE);
+        assert!(Panel::ALL.into_iter().all(|p| !app.dock.is_open(p)), "F4 hides every panel");
+        assert_eq!(app.prefs.workspaces.layout(), kept, "the workspace keeps its panels");
+        press(&ctx, &mut app, Key::F4, Modifiers::NONE);
+        assert_eq!(app.dock, before, "F4 again: exactly as they were");
+        // A panel asked for while they are hidden brings them all back, with it in front.
+        press(&ctx, &mut app, Key::F4, Modifiers::NONE);
+        press(&ctx, &mut app, Key::F9, ctrl);
+        assert!(app.panel_visible(Panel::Swatches) && app.panel_visible(Panel::Timeline) && app.panel_visible(Panel::Library));
+        assert!(app.hidden_panels.is_none());
+        // Hidden panels do not outlive a workspace change.
+        app.toggle_hide_panels();
+        app.switch_workspace("animator");
+        assert!(app.hidden_panels.is_none() && app.dock.is_open(Panel::Timeline));
+    }
+
     pub(crate) fn settle(ctx: &egui::Context, app: &mut App) {
         for _ in 0..3 {
             frame(ctx, app, Vec::new());
@@ -1408,6 +1502,57 @@ mod tests {
 
     fn drawn(app: &App, over: Over) -> Option<Drawn> {
         app.dock_view.drawn.iter().find(|d| d.over == over).copied()
+    }
+
+    /// #423: dragging the Timeline's top edge covers or reveals the stage; the artwork keeps its
+    /// place on screen and its zoom, during the drag and after the release. A view that is still
+    /// as Fit in Window left it goes on fitting, and Fit in Window fits again afterwards.
+    #[test]
+    fn resizing_the_timeline_keeps_the_artwork_where_it_is_on_screen() {
+        let origin = |app: &App| {
+            let size = vec2(app.s.doc.stage.width as f32, app.s.doc.stage.height as f32);
+            app.stage_cache.canvas.center() + app.view.pan - size * app.view.zoom * 0.5
+        };
+        let drag_edge = |ctx: &egui::Context, app: &mut App, check: &mut dyn FnMut(&App)| {
+            let edge = drawn(app, Over::Group(Side::Bottom)).expect("the Timeline dock is drawn").header.center_top();
+            frame(ctx, app, pointer(edge, None));
+            frame(ctx, app, pointer(edge, Some(true)));
+            for i in 1..=8 {
+                frame(ctx, app, pointer(edge - vec2(0.0, i as f32 * 12.0), None));
+                check(app);
+            }
+            frame(ctx, app, pointer(edge - vec2(0.0, 96.0), Some(false)));
+            settle(ctx, app);
+            check(app);
+        };
+        // The artist's own view: 50 %, panned.
+        let (mut app, ctx) = app();
+        settle(&ctx, &mut app);
+        app.view.zoom = 0.5;
+        app.view.pan = vec2(73.0, -29.0);
+        settle(&ctx, &mut app);
+        let (before, height) = (origin(&app), app.stage_cache.canvas.height());
+        drag_edge(&ctx, &mut app, &mut |app| {
+            assert!((origin(app) - before).length() < 0.5, "the artwork moved: {:?} -> {:?}", before, origin(app));
+            assert_eq!(app.view.zoom, 0.5, "the zoom changed");
+        });
+        assert!(app.stage_cache.canvas.height() < height - 40.0, "the drag must resize the Timeline");
+        // Fit in Window still fits and centres.
+        app.view.fit = true;
+        settle(&ctx, &mut app);
+        let size = vec2(app.s.doc.stage.width as f32, app.s.doc.stage.height as f32);
+        assert_eq!(app.view.pan, egui::Vec2::ZERO);
+        assert!((origin(&app) + size * app.view.zoom * 0.5 - app.stage_cache.canvas.center()).length() < 0.5);
+        // And a view left as fitted keeps fitting the smaller or larger canvas.
+        let fitted = app.view.zoom;
+        let edge = drawn(&app, Over::Group(Side::Bottom)).expect("the Timeline dock is drawn").header.center_top();
+        frame(&ctx, &mut app, pointer(edge, None));
+        frame(&ctx, &mut app, pointer(edge, Some(true)));
+        frame(&ctx, &mut app, pointer(edge + vec2(0.0, 60.0), None));
+        frame(&ctx, &mut app, pointer(edge + vec2(0.0, 60.0), Some(false)));
+        settle(&ctx, &mut app);
+        assert_eq!(app.view.pan, egui::Vec2::ZERO, "a fitted view stays centred");
+        assert!(app.view.zoom > fitted, "a fitted view fits the larger canvas: {} -> {}", fitted, app.view.zoom);
     }
 
     #[test]

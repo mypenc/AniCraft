@@ -14,6 +14,7 @@ pub fn specs() -> Vec<CommandSpec> {
     let c = |id, label, menu, shortcut, params, mutates, run| CommandSpec { id, label, menu, shortcut, params, mutates, run };
     vec![
         c("draw.drop", "Drop", "", None, "{} the selected raw shapes cut and join the raw shapes they touch (after a move), on each layer", true, (|s, p| s.each_layer(true, |s| drop(s, p))) as crate::RunFn),
+        c("draw.float", "Float", "", None, "{} the selected raw shapes stay whole, on top of the drawing, until they are deselected: then they cut and join what they lie on (as the editor leaves a moved selection, ADR 0122)", true, float),
         c("element.select_connected", "Select Connected", "", None, "{x, y, add?, slop?} a raw stroke and the strokes joined to it, or a raw fill and the strokes on and in it", false, select_connected),
     ]
 }
@@ -32,6 +33,55 @@ pub(crate) fn mergeable(e: &Element) -> Option<&Shape> {
 pub(crate) fn reach(s: &Shape, m: &Affine) -> Rect {
     let pad = s.stroke.as_ref().map_or(0.0, Stroke::reach) * m.mean_scale();
     s.path.bounds().transformed(m).inflate(pad + 2.0 * SNAP)
+}
+
+/// Splits raw pieces into the drawings they make: pieces whose bounds touch go in one group, so a
+/// fill and the strokes on its edges move, turn and align as one shape (#297, #301). `boxes` are
+/// the pieces' bounds in one space; each group lists indexes into it, in order.
+pub(crate) fn touching_groups(boxes: &[Rect]) -> Vec<Vec<usize>> {
+    // Every entry of `parent` is an index into it, so the lookups below stay in range.
+    fn root(parent: &mut [usize], i: usize) -> usize {
+        let mut r = i;
+        while parent[r] != r {
+            r = parent[r];
+        }
+        let mut j = i;
+        while parent[j] != r {
+            let next = parent[j];
+            parent[j] = r;
+            j = next;
+        }
+        r
+    }
+    let grown: Vec<Rect> = boxes.iter().map(|b| b.inflate(SNAP)).collect();
+    let mut parent: Vec<usize> = (0..boxes.len()).collect();
+    // Sweep along x: only pieces whose x spans overlap can touch.
+    let mut order: Vec<usize> = (0..boxes.len()).collect();
+    order.sort_by(|&a, &b| grown[a].min.x.total_cmp(&grown[b].min.x));
+    for (k, &i) in order.iter().enumerate() {
+        for &j in order.iter().skip(k + 1) {
+            if grown[j].min.x > grown[i].max.x {
+                break;
+            }
+            if !grown[i].intersect(&grown[j]).is_empty() {
+                let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                parent[a.max(b)] = a.min(b);
+            }
+        }
+    }
+    let mut group_of: Vec<Option<usize>> = vec![None; boxes.len()];
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for i in 0..boxes.len() {
+        let r = root(&mut parent, i);
+        match group_of[r] {
+            Some(g) => groups[g].push(i),
+            None => {
+                group_of[r] = Some(groups.len());
+                groups.push(vec![i]);
+            }
+        }
+    }
+    groups
 }
 
 /// Where new raw shapes go in the drawing's stacking (the Brush tool's paint modes, ADR 0033).
@@ -314,6 +364,60 @@ pub(crate) fn drop_selected(s: &mut Session) -> Result<Value> {
     keep.extend(merge_in(s, moving)?);
     s.select_only(keep);
     Ok(json!({"dropped": n, "selected": s.selection.id_list()}))
+}
+
+/// `draw.float`: the selected raw shapes float (ADR 0122). In Animate a selection moved onto
+/// other artwork does not cut it while it stays selected: it can be moved on, or back, and
+/// what is under it is untouched until the selection lets go (#487). They go on top of their
+/// layers, where the merge will put them, so nothing jumps when they settle
+/// (`Session::settle_floating`).
+fn float(s: &mut Session, _: &Value) -> Result<Value> {
+    float_selected(s)
+}
+
+/// [`float`] for every layer with selected raw shapes.
+pub(crate) fn float_selected(s: &mut Session) -> Result<Value> {
+    let frame = s.frame;
+    // Shapes already floating on this frame (a paste, an earlier move) stay so.
+    let mut items: Vec<(anicraft_doc::LayerId, ElementId)> = s.floating.take().filter(|f| f.frame == frame).map(|f| f.items).unwrap_or_default();
+    let mut n = 0;
+    for layer in s.selected_layers() {
+        let sel = s.selection.on(layer);
+        let raised = s.with_layer(layer, |s| -> Result<Vec<ElementId>> {
+            let kf = s.editable_keyframe()?;
+            let (top, rest): (Vec<Arc<Element>>, Vec<Arc<Element>>) = std::mem::take(&mut kf.elements).into_iter().partition(|e| sel.contains(&e.id) && mergeable(e).is_some());
+            let ids = top.iter().map(|e| e.id).collect();
+            kf.elements = rest;
+            kf.elements.extend(top);
+            Ok(ids)
+        })?;
+        n += raised.len();
+        for id in raised {
+            if !items.contains(&(layer, id)) {
+                items.push((layer, id));
+            }
+        }
+    }
+    s.floating = (!items.is_empty()).then_some(crate::Floating { items, frame });
+    Ok(json!({"floating": n}))
+}
+
+/// The raw shapes `ids` of the active keyframe, left whole on top by a floating paste or move, go
+/// into the drawing where they lie.
+pub(crate) fn settle(s: &mut Session, ids: &[ElementId]) -> Result<()> {
+    let kf = s.editable_keyframe()?;
+    let mut floating = Vec::new();
+    kf.elements.retain(|e| {
+        let take = ids.contains(&e.id) && mergeable(e).is_some();
+        if take {
+            floating.push((**e).clone());
+        }
+        !take
+    });
+    if !floating.is_empty() {
+        merge_in(s, floating)?;
+    }
+    Ok(())
 }
 
 // ----- the Paint Bucket and imported drawings (ADR 0042) ---------------------------------------

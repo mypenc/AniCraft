@@ -45,9 +45,31 @@ pub struct FrameJob {
     /// A symbol open in place, in front of the picture (ADR 0045): onion skin composes its own
     /// frames (ADR 0051). Set with [`FrameJob::inside`].
     pub front: Option<Arc<Front>>,
+    /// The reference videos' pictures for this frame (ADR 0116): the stage's alone, never an
+    /// export's. Set with [`FrameJob::with_reference`].
+    pub reference: Option<Arc<Vec<crate::video::RefFrame>>>,
 }
 
 impl FrameJob {
+    /// The same job with the reference videos' pictures `frames` under the artwork, keyed
+    /// apart by which pictures they are.
+    pub fn with_reference(mut self, frames: Option<Arc<Vec<crate::video::RefFrame>>>) -> FrameJob {
+        if let Some(f) = frames.filter(|f| !f.is_empty()) {
+            let mix = |k: u64| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                (k, "video").hash(&mut h);
+                for r in f.iter() {
+                    (r.element.0, r.serial).hash(&mut h);
+                }
+                h.finish()
+            };
+            self.key = mix(self.key);
+            self.scene = mix(self.scene);
+            self.reference = Some(f);
+        }
+        self
+    }
+
     /// The same job seen through the scene's camera (`on`), keyed apart from the plain one.
     pub fn through_camera(mut self, on: bool) -> FrameJob {
         if on && !self.camera {
@@ -86,10 +108,14 @@ impl FrameJob {
     /// symbol's own timeline when there is one (ADR 0051).
     pub fn display_list(&self) -> DisplayList {
         let onion = self.onion.as_ref().filter(|o| o.shows());
-        match (&self.front, onion) {
+        let mut dl = match (&self.front, onion) {
             (Some(front), Some(skin)) => display_list_inside(&self.doc, self.frame, front, skin),
             _ => display_list_for(&self.doc, self.frame, self.onion.as_ref(), self.camera),
+        };
+        if let Some(frames) = &self.reference {
+            crate::video::fill(&mut dl, frames);
         }
+        dl
     }
 }
 
@@ -207,7 +233,7 @@ pub fn frame_key(state: StateId, frame: u32, view: &View, onion: Option<&OnionSk
 /// A job whose `scene` is derived from the same inputs as its key.
 pub fn make_job(state: StateId, doc: &Document, frame: u32, view: View, onion: Option<&OnionSkin>) -> FrameJob {
     let onion = onion.filter(|o| o.shows()).copied();
-    FrameJob { key: frame_key(state, frame, &view, onion.as_ref()), raster: 0, scene: scene_key(state, frame, onion.as_ref()), doc: doc.clone(), frame, view, onion, camera: false, front: None }
+    FrameJob { key: frame_key(state, frame, &view, onion.as_ref()), raster: 0, scene: scene_key(state, frame, onion.as_ref()), doc: doc.clone(), frame, view, onion, camera: false, front: None, reference: None }
 }
 
 /// A job for rasterizer `raster` (from [`RenderService::raster_id`]; 0 is the CPU oracle, and
@@ -315,6 +341,9 @@ pub struct FrameCache {
     pub native_budget_bytes: usize,
     pub hits: u64,
     pub misses: u64,
+    /// How many times the cache was cleared: a picture whose drawing began before a clear
+    /// belongs to the document that was put aside, and is not kept.
+    cleared: u64,
 }
 
 /// `(bytes in memory, bytes on the GPU)` an image holds.
@@ -325,7 +354,7 @@ fn cost(img: &FrameImage) -> (usize, usize) {
 
 impl FrameCache {
     pub fn new(budget_bytes: usize) -> Self {
-        FrameCache { map: HashMap::new(), tick: 0, bytes: 0, native_bytes: 0, budget_bytes, native_budget_bytes: DEFAULT_NATIVE_CACHE_BYTES, hits: 0, misses: 0 }
+        FrameCache { map: HashMap::new(), tick: 0, bytes: 0, native_bytes: 0, budget_bytes, native_budget_bytes: DEFAULT_NATIVE_CACHE_BYTES, hits: 0, misses: 0, cleared: 0 }
     }
     pub fn get(&mut self, key: u64) -> Option<Arc<FrameImage>> {
         self.tick += 1;
@@ -371,6 +400,13 @@ impl FrameCache {
         let (cpu, gpu) = cost(img);
         self.bytes = self.bytes.saturating_sub(cpu);
         self.native_bytes = self.native_bytes.saturating_sub(gpu);
+    }
+    /// Forgets every picture (the document they show is no longer on screen, ADR 0112).
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.bytes = 0;
+        self.native_bytes = 0;
+        self.cleared += 1;
     }
     pub fn len(&self) -> usize {
         self.map.len()
@@ -582,6 +618,21 @@ impl RenderService {
         !q.busy.is_empty() || !q.urgent.is_empty() || !q.prefetch.is_empty()
     }
 
+    /// Forgets every finished picture, in memory and on the GPU: an editor showing another
+    /// document calls it, so the one put aside keeps no pictures (ADR 0112).
+    ///
+    /// Work still waiting is dropped, and a batch the worker is drawing right now is thrown
+    /// away when it finishes (it began before the clear), so nothing of that document comes
+    /// back into the cache afterwards.
+    pub fn forget_pictures(&self) {
+        {
+            let mut q = self.queue();
+            q.urgent.clear();
+            q.prefetch.clear();
+        }
+        self.cache().clear();
+    }
+
     /// `(images, bytes, hits, misses)`.
     pub fn cache_stats(&self) -> (usize, usize, u64, u64) {
         let c = self.cache();
@@ -639,16 +690,19 @@ fn worker_loop(s: &Shared) {
                 q = s.wake.wait(q).unwrap_or_else(PoisonError::into_inner);
             }
         };
-        let todo: Vec<FrameJob> = {
+        let (todo, cleared): (Vec<FrameJob>, u64) = {
             let cache = s.cache.lock().unwrap_or_else(PoisonError::into_inner);
-            jobs.iter().filter(|j| !cache.contains(j.key)).cloned().collect()
+            (jobs.iter().filter(|j| !cache.contains(j.key)).cloned().collect(), cache.cleared)
         };
         let slot = s.raster.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let imgs = render_batch_by(&todo, &slot);
         {
             let mut cache = s.cache.lock().unwrap_or_else(PoisonError::into_inner);
-            for img in imgs {
-                cache.insert(Arc::new(img));
+            // Cleared meanwhile (`forget_pictures`): these show a document put aside.
+            if cache.cleared == cleared {
+                for img in imgs {
+                    cache.insert(Arc::new(img));
+                }
             }
         }
         {
@@ -685,6 +739,28 @@ mod tests {
         assert_eq!(img.rgba_premul, direct.rgba_premul);
         // second request is a cache hit
         assert!(svc.request(j).is_some());
+    }
+
+    /// Forgetting the pictures (another document is shown, ADR 0112) also covers the ones
+    /// still being drawn: none of them lands in the cache afterwards.
+    #[test]
+    fn pictures_in_progress_are_not_kept_once_forgotten() {
+        let doc = sample::demo();
+        for round in 0..20u64 {
+            let svc = RenderService::new(64 << 20, None);
+            svc.prefetch((0..8).map(|f| job(&doc, 100 + round, f)).collect());
+            // At a different moment of the worker's batch each round.
+            std::thread::sleep(std::time::Duration::from_micros(round * 150));
+            svc.forget_pictures();
+            for _ in 0..10_000 {
+                if !svc.busy() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(!svc.busy(), "the worker finished");
+            assert_eq!(svc.cache_stats().0, 0, "round {round}: a picture drawn for the forgotten document was kept");
+        }
     }
 
     #[test]

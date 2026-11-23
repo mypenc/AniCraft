@@ -30,7 +30,8 @@ anicraft-plugins = { path = "crates/plugins" }
 anicraft-audio = { path = "crates/audio" }
 anicraft-gpu = { path = "crates/gpu" }
 anicraft-guide = { path = "crates/guide" }
-craft-anicraft-format = { git = "https://github.com/storytold/craft-libs", rev = "f0f4758c01581d79577b9bf5046c06f4e77b1f18" }
+craft-anicraft-format = { git = "https://github.com/storytold/craft-libs", rev = "08da5e1486ee640de1d2cccd8fe8dd32b1d3b62c" }
+craft-svg = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "d20a82481b1f7b1d32c818b19c620338af9755d3", default-features = false }
 craft-mime = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "f0f4758c01581d79577b9bf5046c06f4e77b1f18" }
 craft-html = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "f0f4758c01581d79577b9bf5046c06f4e77b1f18", default-features = false }
 craft-audio = { git = "https://github.com/storytold/craft-libs", rev = "e2bf53f2bdba4828e21097774a568ed9c74b0004", default-features = false, features = ["decode", "pcm-encode"] }
@@ -40,6 +41,9 @@ craft-apng-container = { package = "craft-image-codecs", version = "0.1.0", git 
 craft-image-codecs = { git = "https://github.com/storytold/craft-libs", rev = "f0f4758c01581d79577b9bf5046c06f4e77b1f18" }
 craft-webp = { git = "https://github.com/storytold/craft-libs", rev = "0c144b7d983899d4b5b281046dd03a8b1ab35fbb" }
 craft-xfl = { git = "https://github.com/storytold/craft-libs", rev = "b67b9f90c50091a3090f93fa054c34e409edba11" }
+# Delimited text (CSV, TSV) for data tables (ADR 0118): encoding and delimiter detection and a
+# bounded record parser. The same reviewed commit as craft-mime and craft-gif.
+craft-csv = { git = "https://github.com/storytold/craft-libs", rev = "f0f4758c01581d79577b9bf5046c06f4e77b1f18" }
 craft-xml = { git = "https://github.com/storytold/craft-libs", rev = "b67b9f90c50091a3090f93fa054c34e409edba11" }
 # The GPU stage (ADR 0019) uses the wgpu that eframe's egui-wgpu brings, with the same
 # (default) features, so the tree keeps one wgpu build.
@@ -53,6 +57,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 rayon = "1"
+# Unions of flattened polygons on an integer grid, for a stroke's outline (ADR 0110): pure
+# Rust, no unsafe in our use, MIT OR Apache-2.0 (its i_float, i_shape, i_tree and i_key_sort: MIT).
+i_overlay = { version = "9.2", default-features = false }
 # wgpu is the primary renderer; glow (OpenGL) is the fallback for GPUs/VMs where wgpu fails.
 # Default features off: we skip `links` (opening web links pulls in url/idna/ICU Unicode
 # tables we don't use) and the web-only screen-reader shim. Same set as PhotoCraft, plus glow.
@@ -120,10 +127,16 @@ sys-locale = "0.3"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The user guide, bundled for Help › User Guide (ADR 0069). The web build serves it as pages instead.
 anicraft-guide.workspace = true
+# The live control port and the tools it serves (ADR 0104): the same dispatcher as the
+# headless MCP server, so live and headless never drift.
+anicraft-cli = { path = "crates/cli" }
 craft-update = { git = "https://github.com/storytold/craft-libs", rev = "6ac2a6a34ae83fc0f0bfb25a569ba6388b72266a" }
 
 eframe = { workspace = true, features = ["links"] }
 rfd.workspace = true
+# Pictures copied in other apps, for Paste (#263). The clipboard library eframe already uses
+# for text (MIT OR Apache-2.0), with the same features, so no crate is added to the build.
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 # Sound output (Apache-2.0): WASAPI on Windows, CoreAudio on macOS, ALSA on Linux and the BSDs.
 cpal = { version = "0.18", optional = true }
 
@@ -134,6 +147,8 @@ cpal = { version = "0.18", optional = true }
 # objc2 / objc2-app-kit / objc2-foundation are the versions wgpu already brings on macOS.
 [target.'cfg(target_os = "macos")'.dependencies]
 fmv-macos-events = "=0.1.0"
+# Waits for the answer of a file dialog shown as a sheet (`platform::start_file_dialog`).
+pollster.workspace = true
 
 # The system's high-contrast setting (ADR 0064): one registry value. MIT, already in the tree
 # through craft-update.

@@ -5,12 +5,31 @@ use crate::nine_slice::Slicing;
 use crate::player::PlayerState;
 use crate::{ColorTransform, Document, Element, ElementId, ElementKind, Layer, LayerId, LayerKind, MaskMode, Paint, Rgba, Shape, Stroke, SymbolId, SymbolKind, Timeline, TweenKind};
 use anicraft_geom::walk::PathWalk;
-use anicraft_geom::{Affine, FillRule, Path};
+use anicraft_geom::{Affine, FillRule, Path, Vec2};
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::sync::Arc;
 
 /// Symbols nested deeper than this are not drawn (guards cyclic libraries).
 pub const MAX_SYMBOL_DEPTH: usize = 32;
+
+/// Most elements one evaluation (or one bounds query) visits, nested symbols and groups
+/// included. The depth cap alone leaves a symbol holding two instances of the next, 32 deep,
+/// to expand 2^32 times, which no file may make AniCraft do: past the allowance the rest is
+/// left out, so a hostile or damaged document draws in part instead of hanging or running
+/// out of memory. Real scenes stay far below it (the heaviest benchmark has 50,000 shapes).
+pub const MAX_EVAL_ELEMENTS: u32 = 1_000_000;
+
+/// Takes one visit from `work`; `false` once the allowance is spent.
+pub(crate) fn spend(work: &Cell<u32>) -> bool {
+    match work.get().checked_sub(1) {
+        Some(left) => {
+            work.set(left);
+            true
+        }
+        None => false,
+    }
+}
 
 /// One shape to draw, fully resolved to stage space.
 #[derive(Clone, Debug)]
@@ -65,6 +84,9 @@ pub struct DisplayList {
     /// through each other. A group's items are one unbroken run of `items`, nested runs for
     /// nested groups; a parent always has a lower index.
     pub groups: Vec<Group>,
+    /// Links on text (ADR 0085): `(item, url)` for each item drawing characters that link
+    /// somewhere, in item order. Sparse: most lists have none.
+    pub links: Vec<(u32, Arc<str>)>,
 }
 
 /// A group that fades as one (see [`DisplayList::groups`]).
@@ -138,6 +160,8 @@ impl DisplayList {
             self.set_clip_mode(base + i as u32, m);
         }
         self.groups.extend(other.groups.into_iter().map(|g| Group { parent: gshift(g.parent), alpha: g.alpha, blend: g.blend, filters: g.filters, clip: shift(g.clip) }));
+        let ibase = self.items.len() as u32;
+        self.links.extend(other.links.into_iter().map(|(i, u)| (i + ibase, u)));
         self.items.extend(other.items.into_iter().map(|mut i| {
             i.clip = shift(i.clip);
             i.masks = shift(i.masks);
@@ -158,7 +182,8 @@ pub fn evaluate(doc: &Document, frame: u32) -> DisplayList {
 /// applied: what the stage shows while editing (and what picking and bounds use).
 pub fn evaluate_scene(doc: &Document, scene: usize, frame: u32) -> DisplayList {
     let mut out = DisplayList::default();
-    eval_timeline(doc, doc.timeline(scene), frame, &Ctx::top(Affine::IDENTITY), &mut out, None);
+    let work = Cell::new(MAX_EVAL_ELEMENTS);
+    eval_timeline(doc, doc.timeline(scene), frame, &Ctx::top(Affine::IDENTITY, &work), &mut out, None);
     out
 }
 
@@ -167,7 +192,8 @@ pub fn evaluate_scene(doc: &Document, scene: usize, frame: u32) -> DisplayList {
 /// top-level ones, as a scene's are in [`evaluate_scene`].
 pub fn evaluate_timeline(doc: &Document, tl: &Timeline, frame: u32) -> DisplayList {
     let mut out = DisplayList::default();
-    eval_timeline(doc, tl, frame, &Ctx::top(Affine::IDENTITY), &mut out, None);
+    let work = Cell::new(MAX_EVAL_ELEMENTS);
+    eval_timeline(doc, tl, frame, &Ctx::top(Affine::IDENTITY, &work), &mut out, None);
     out
 }
 
@@ -177,7 +203,8 @@ pub fn evaluate_timeline(doc: &Document, tl: &Timeline, frame: u32) -> DisplayLi
 /// skin or Edit Multiple Frames composes its frames (ADR 0051).
 pub fn evaluate_timeline_at(doc: &Document, tl: &Timeline, frame: u32, xf: Affine) -> DisplayList {
     let mut out = DisplayList::default();
-    eval_timeline(doc, tl, frame, &Ctx::top(xf), &mut out, None);
+    let work = Cell::new(MAX_EVAL_ELEMENTS);
+    eval_timeline(doc, tl, frame, &Ctx::top(xf, &work), &mut out, None);
     out
 }
 
@@ -187,7 +214,8 @@ pub fn evaluate_timeline_at(doc: &Document, tl: &Timeline, frame: u32, xf: Affin
 pub fn evaluate_scene_camera(doc: &Document, scene: usize, frame: u32) -> DisplayList {
     let tl = doc.timeline(scene);
     let mut out = DisplayList::default();
-    eval_timeline(doc, tl, frame, &Ctx::through(tl.camera_at(frame, &doc.stage)), &mut out, None);
+    let work = Cell::new(MAX_EVAL_ELEMENTS);
+    eval_timeline(doc, tl, frame, &Ctx::through(tl.camera_at(frame, &doc.stage), &work), &mut out, None);
     out
 }
 
@@ -196,9 +224,10 @@ pub fn evaluate_scene_camera(doc: &Document, scene: usize, frame: u32) -> Displa
 /// through the scene's camera.
 pub fn evaluate_player(doc: &Document, state: &PlayerState) -> DisplayList {
     let mut out = DisplayList::default();
+    let work = Cell::new(MAX_EVAL_ELEMENTS);
     let play = Play { state, path: Vec::new() };
     let tl = doc.timeline(state.scene);
-    eval_timeline(doc, tl, state.root.frame, &Ctx::through(tl.camera_at(state.root.frame, &doc.stage)), &mut out, Some(&play));
+    eval_timeline(doc, tl, state.root.frame, &Ctx::through(tl.camera_at(state.root.frame, &doc.stage), &work), &mut out, Some(&play));
     out
 }
 
@@ -206,7 +235,8 @@ pub fn evaluate_player(doc: &Document, state: &PlayerState) -> DisplayList {
 /// clip's artwork, as the player sees it when `play` is given.
 pub(crate) fn evaluate_symbol(doc: &Document, tl: &Timeline, frame: u32, xf: Affine, play: Option<&Play<'_>>) -> DisplayList {
     let mut out = DisplayList::default();
-    let mut cx = Ctx::top(xf);
+    let work = Cell::new(MAX_EVAL_ELEMENTS);
+    let mut cx = Ctx::top(xf, &work);
     cx.depth = 1;
     cx.stage = false;
     eval_timeline(doc, tl, frame, &cx, &mut out, play);
@@ -284,6 +314,10 @@ pub(crate) fn evaluate_tweened<'a>(layer: &'a Layer, frame: u32, guide: Option<&
     let t = Progress::of(tween, (frame - kf.start) as f32 / kf.duration.max(1) as f32);
     let morph = tween.kind == TweenKind::Shape;
     let path = guide.map(|g| (g, tween.orient));
+    let runs = |els: &[Arc<Element>]| els.iter().filter(|e| raw_stroke(e).is_some()).count();
+    if morph && runs(&kf.elements) != runs(&next.elements) {
+        return Some((kf.start, Cow::Owned(morph_raw_strokes(kf, next, t, path))));
+    }
     let pairs = if morph && !kf.hints.is_empty() { crate::hints::hint_pairs(kf, next) } else { Vec::new() };
     let els = kf
         .elements
@@ -308,23 +342,147 @@ pub struct Progress {
     pub scale: f32,
     pub color: f32,
     pub filters: f32,
+    /// The scale axes move geometrically (the tween's Keep area, ADR 0115).
+    pub keep_area: bool,
 }
 
 impl Progress {
     /// Everything at `t`.
     pub fn uniform(t: f32) -> Progress {
-        Progress { main: t, position: t, rotation: t, scale: t, color: t, filters: t }
+        Progress { main: t, position: t, rotation: t, scale: t, color: t, filters: t, keep_area: false }
     }
 
     /// `tween` at linear progress `t`.
     pub fn of(tween: &crate::Tween, t: f32) -> Progress {
         let main = tween.easing.apply(t);
         if tween.groups.is_empty() {
-            return Progress::uniform(main);
+            return Progress { keep_area: tween.keep_area, ..Progress::uniform(main) };
         }
         let g = |g: crate::EaseGroup| if tween.has_own(g) { tween.ease(g).apply(t) } else { main };
-        Progress { main, position: g(crate::EaseGroup::Position), rotation: g(crate::EaseGroup::Rotation), scale: g(crate::EaseGroup::Scale), color: g(crate::EaseGroup::Color), filters: g(crate::EaseGroup::Filters) }
+        Progress { main, position: g(crate::EaseGroup::Position), rotation: g(crate::EaseGroup::Rotation), scale: g(crate::EaseGroup::Scale), color: g(crate::EaseGroup::Color), filters: g(crate::EaseGroup::Filters), keep_area: tween.keep_area }
     }
+}
+
+/// A raw stroke run (merge drawing, ADR 0031): a raw shape's outline is stored as one element
+/// per run of its stroke, apart from its fill.
+fn raw_stroke(e: &Element) -> Option<&Stroke> {
+    match &e.kind {
+        ElementKind::Shape(s) if s.merge && s.fill.is_none() => s.stroke.as_ref(),
+        _ => None,
+    }
+}
+
+/// Raw stroke runs joined into one outline: the indices of the runs (the first one's space is
+/// the outline's) and the joined element.
+struct Joined {
+    members: Vec<usize>,
+    el: Element,
+}
+
+/// The raw stroke runs of `els` joined into one element per stroke style (and scale, rotation
+/// and skew, which the stroke's width follows, and colour effect), each in the space of its first run.
+fn joined_runs(els: &[Arc<Element>]) -> Vec<Joined> {
+    let mut out: Vec<Joined> = Vec::new();
+    for (i, e) in els.iter().enumerate() {
+        let (Some(st), ElementKind::Shape(s)) = (raw_stroke(e), &e.kind) else { continue };
+        let slot = out.iter_mut().find_map(|j| {
+            let ElementKind::Shape(js) = &mut j.el.kind else { return None };
+            let into = j.el.transform.inverse()?.mul(&e.transform);
+            (j.el.transform.m[..4] == e.transform.m[..4] && js.stroke.as_ref() == Some(st) && j.el.color == e.color).then_some((&mut j.members, js, into))
+        });
+        match slot {
+            Some((members, js, into)) => {
+                members.push(i);
+                Arc::make_mut(&mut js.path).cmds.extend(s.path.transformed(&into).cmds);
+            }
+            None => out.push(Joined { members: vec![i], el: (**e).clone() }),
+        }
+    }
+    for j in &mut out {
+        if let ElementKind::Shape(s) = &mut j.el.kind {
+            s.path = Arc::new(anicraft_geom::morph::chain(&s.path, anicraft_geom::planar::SNAP));
+        }
+    }
+    out
+}
+
+/// The partner on `b` of each joined outline of `a`: one with the same stroke and colour first, then the
+/// rest in order.
+fn pair_joined(a: &[Joined], b: &[Joined]) -> Vec<Option<usize>> {
+    let mut taken = vec![false; b.len()];
+    let mut out: Vec<Option<usize>> = a
+        .iter()
+        .map(|x| {
+            let m = b.iter().zip(&taken).position(|(y, &used)| !used && raw_stroke(&y.el) == raw_stroke(&x.el) && y.el.color == x.el.color)?;
+            if let Some(u) = taken.get_mut(m) {
+                *u = true;
+            }
+            Some(m)
+        })
+        .collect();
+    for slot in out.iter_mut().filter(|s| s.is_none()) {
+        *slot = taken.iter().position(|&used| !used);
+        if let Some(u) = slot.and_then(|m| taken.get_mut(m)) {
+            *u = true;
+        }
+    }
+    out
+}
+
+/// `e` shrunk to the centre of its path: where an outline without a partner grows from or
+/// shrinks to.
+fn collapsed(e: &Element) -> Element {
+    let mut e = e.clone();
+    if let ElementKind::Shape(s) = &mut e.kind {
+        let c = s.path.bounds().center();
+        s.path = Arc::new(s.path.transformed(&Affine { m: [0.0, 0.0, 0.0, 0.0, c.x, c.y] }));
+    }
+    e
+}
+
+/// A shape tween between keyframes whose raw shapes have different numbers of stroke runs: the
+/// runs of each keyframe are joined into whole outlines that morph like the fills, in place of
+/// pairing the runs one by one. An outline with no partner shrinks away or grows in. Hints
+/// steer the outlines (and the other elements) they are placed on at both ends. Everything else
+/// pairs in order, as in a plain shape tween.
+fn morph_raw_strokes(kf: &crate::Keyframe, next: &crate::Keyframe, t: Progress, guide: Option<(&PathWalk, bool)>) -> Vec<Arc<Element>> {
+    let (a, b) = (&kf.elements, &next.elements);
+    let (runs_a, runs_b) = (joined_runs(a), joined_runs(b));
+    let partner = pair_joined(&runs_a, &runs_b);
+    let placed = if kf.hints.is_empty() { Vec::new() } else { crate::hints::placed_hints(kf, next) };
+    // The hints placed on what `on_a` and `on_b` pick, in the spaces of `x` and `y`.
+    let hints =
+        |on_a: &dyn Fn(usize) -> bool, on_b: &dyn Fn(usize) -> bool, x: &Element, y: &Element| -> Vec<(anicraft_geom::Vec2, anicraft_geom::Vec2)> {
+            let (Some(ia), Some(ib)) = (x.transform.inverse(), y.transform.inverse()) else { return Vec::new() };
+            placed.iter().filter(|h| on_a(h.0) && on_b(h.1)).map(|h| (ia.apply(h.2), ib.apply(h.3))).collect()
+        };
+    let mut rest_b = b.iter().enumerate().filter(|(_, e)| raw_stroke(e).is_none());
+    let mut out = Vec::with_capacity(a.len());
+    for (i, x) in a.iter().enumerate() {
+        if raw_stroke(x).is_none() {
+            let y = rest_b.next();
+            out.push(
+                y.and_then(|(j, y)| interpolate(x, y, t, true, &hints(&|h| h == i, &|h| h == j, x, y), guide)).map_or_else(|| x.clone(), Arc::new),
+            );
+            continue;
+        }
+        let Some((k, ra)) = runs_a.iter().enumerate().find(|(_, r)| r.members.first() == Some(&i)) else { continue };
+        let el = match partner.get(k).copied().flatten().and_then(|m| runs_b.get(m)) {
+            Some(rb) => {
+                interpolate(&ra.el, &rb.el, t, true, &hints(&|h| ra.members.contains(&h), &|h| rb.members.contains(&h), &ra.el, &rb.el), guide)
+            }
+            // No partner on the end keyframe: it shrinks away.
+            None => interpolate(&ra.el, &collapsed(&ra.el), t, false, &[], guide),
+        };
+        out.push(Arc::new(el.unwrap_or_else(|| ra.el.clone())));
+    }
+    // Outlines only on the end keyframe grow in.
+    for (_, rb) in runs_b.iter().enumerate().filter(|(m, _)| !partner.contains(&Some(*m))) {
+        if let Some(el) = interpolate(&collapsed(&rb.el), &rb.el, t, false, &[], guide) {
+            out.push(Arc::new(el));
+        }
+    }
+    out
 }
 
 /// Interpolates two elements; `None` when they cannot tween. With `morph` (a shape tween),
@@ -367,8 +525,9 @@ fn interpolate(a: &Element, b: &Element, pr: Progress, morph: bool, hints: &[(an
             };
             ElementKind::Shape(Shape { path, fill, stroke, fill_rule: sa.fill_rule, merge: sa.merge, warp })
         }
-        // An instance tweens its filters when both keyframes have the same kinds in the same
-        // order (Animate's rule); otherwise they hold.
+        // An instance tweens its filters: pairwise when both keyframes have the same kinds in
+        // the same order, else as Animate pairs them, a filter without a partner fading in or
+        // out (ADR 0099).
         (ElementKind::Symbol { symbol: s1, filters: fa, .. }, ElementKind::Symbol { symbol: s2, filters: fb, .. }) if s1 == s2 => {
             let mut k = a.kind.clone();
             if let (ElementKind::Symbol { filters, .. }, Some(lerped)) = (&mut k, crate::filter::lerp_filters(fa, fb, pr.filters)) {
@@ -376,8 +535,12 @@ fn interpolate(a: &Element, b: &Element, pr: Progress, morph: bool, hints: &[(an
             }
             k
         }
-        // Text tweens its placement and colour effect; the words stay the first keyframe's.
-        (ElementKind::Text(_), ElementKind::Text(_)) => a.kind.clone(),
+        // Text tweens its placement, colour effect and filters (ADR 0099); the words stay the
+        // first keyframe's.
+        (ElementKind::Text(ta), ElementKind::Text(tb)) => match crate::filter::lerp_filters(&ta.filters, &tb.filters, pr.filters) {
+            Some(filters) => ElementKind::Text(Arc::new(crate::TextBlock { filters, ..(**ta).clone() })),
+            None => a.kind.clone(),
+        },
         (ElementKind::Camera, ElementKind::Camera) => ElementKind::Camera,
         // A group tweens its placement and colour effect, and its members pair by order, layer by
         // layer, tweening as they would on their own (ADR 0073); a member without a partner holds.
@@ -400,16 +563,48 @@ fn interpolate(a: &Element, b: &Element, pr: Progress, morph: bool, hints: &[(an
         let (r, s) = (da.lerp(&db, pr.rotation), da.lerp(&db, pr.scale));
         (d.rotation, d.skew, d.sx, d.sy) = (r.rotation, r.skew, s.sx, s.sy);
     }
+    // Keep area (ADR 0115): each scale axis goes geometrically from its key to the next, so
+    // the area (sx · sy; skew and rotation don't change it) of two keys that share it stays on
+    // every frame, and eases smoothly from one to the other when they don't.
+    if pr.keep_area {
+        d.sx = anicraft_geom::lerp_geometric(da.sx, db.sx, pr.scale);
+        d.sy = anicraft_geom::lerp_geometric(da.sy, db.sy, pr.scale);
+    }
     let mut transform = d.compose();
+    // An instance with a transformation point (ADR 0111) turns, scales and skews about it: the
+    // point travels from where the first keyframe has it to where the next does, and the
+    // instance is placed round it. (A keyframe without one takes the other's.) Without a
+    // point this is the registration point, as above.
+    let pivot = match (a.pivot().or(b.pivot()), b.pivot().or(a.pivot())) {
+        (Some(pa), Some(pb)) => {
+            let (qa, qb) = (a.transform.apply(pa), b.transform.apply(pb));
+            let (q, p) = (qa + (qb - qa) * pr.position, pa + (pb - pa) * pr.position);
+            let about = Affine { m: [transform.m[0], transform.m[1], transform.m[2], transform.m[3], 0.0, 0.0] };
+            let o = about.apply(p);
+            let placed = Affine::translate(q.x - o.x, q.y - o.y).mul(&about);
+            if placed.is_finite() {
+                transform = placed;
+            }
+            Some(p)
+        }
+        _ => None,
+    };
     if let Some((g, orient)) = guide {
         transform = follow(g, orient, &a.transform, &b.transform, pr.position, transform);
     }
-    Some(Element { id: a.id, name: a.name.clone(), transform, color: a.color.lerp(&b.color, pr.color), kind })
+    let mut el = Element { id: a.id, name: a.name.clone(), transform, color: a.color.lerp(&b.color, pr.color), kind };
+    if pivot.is_some() {
+        el.set_pivot(pivot);
+    }
+    Some(el)
 }
 
 /// What a timeline is evaluated inside of.
 #[derive(Clone, Copy)]
-struct Ctx {
+struct Ctx<'a> {
+    /// The evaluation's allowance of element visits ([`MAX_EVAL_ELEMENTS`]), shared by everything
+    /// nested in it.
+    work: &'a Cell<u32>,
     /// Local → stage transform and colour effect of the enclosing instance.
     xf: Affine,
     color: ColorTransform,
@@ -436,14 +631,14 @@ struct Ctx {
     slice: Option<Slicing>,
 }
 
-impl Ctx {
-    fn top(xf: Affine) -> Ctx {
-        Ctx { xf, color: ColorTransform::IDENTITY, depth: 0, root: None, outline: None, stage: true, clip: None, masks: None, guide: false, group: None, camera: None, slice: None }
+impl<'a> Ctx<'a> {
+    fn top(xf: Affine, work: &'a Cell<u32>) -> Ctx<'a> {
+        Ctx { work, xf, color: ColorTransform::IDENTITY, depth: 0, root: None, outline: None, stage: true, clip: None, masks: None, guide: false, group: None, camera: None, slice: None }
     }
 
     /// A main timeline seen through `camera`: its tint colours everything.
-    fn through(camera: Option<Camera>) -> Ctx {
-        let mut cx = Ctx::top(Affine::IDENTITY);
+    fn through(camera: Option<Camera>, work: &'a Cell<u32>) -> Ctx<'a> {
+        let mut cx = Ctx::top(Affine::IDENTITY, work);
         cx.stage = false;
         if let Some(c) = camera {
             cx.color = c.color();
@@ -469,22 +664,71 @@ pub fn instance_start(layer: &Layer, frame: u32, id: ElementId, symbol: SymbolId
     start
 }
 
-/// The path a guide layer's first shape traces at `frame`, in the layer's own space.
+/// Most lines of a guide layer that are looked at when joining them into one path.
+const MAX_GUIDE_LINES: usize = 512;
+
+/// How near two line ends are to be one corner of the guide, in the layer's pixels. Lines drawn
+/// with snapping, and the pieces merge drawing cuts a line into, meet much closer than this.
+const GUIDE_JOIN: f32 = 0.75;
+
+/// The path a guide layer traces at `frame`, in the layer's own space: its first shape's line,
+/// continued through every other line on the layer that meets it end to end. A guide drawn as
+/// several strokes (a zigzag made with the Line tool is one raw stroke per straight run, #490)
+/// is one path, sharp corners and all; a closed outline is followed once round.
 pub fn guide_walk(guide: &Layer, frame: u32) -> Option<PathWalk> {
     let (_, els) = evaluate_layer_elements(guide, frame)?;
-    els.iter().find_map(|e| match &e.kind {
-        ElementKind::Shape(s) => {
-            let line = s.path.flatten(&e.transform, 0.25).into_iter().next()?;
-            let mut pts = line.points;
-            if line.closed
-                && let Some(&first) = pts.first()
-            {
-                pts.push(first);
-            }
-            PathWalk::new(&pts)
+    let mut lines = els
+        .iter()
+        .filter_map(|e| match &e.kind {
+            ElementKind::Shape(s) => Some(s.path.flatten(&e.transform, 0.25)),
+            ElementKind::Symbol { .. } | ElementKind::Text(_) | ElementKind::Camera | ElementKind::Group { .. } => None,
+        })
+        .flatten()
+        .filter(|l| l.points.len() >= 2 && l.points.iter().all(|p| p.is_finite()))
+        .take(MAX_GUIDE_LINES);
+    let first = lines.next()?;
+    let mut pts = first.points;
+    if first.closed {
+        // Round and back to its start: nothing joins a closed outline.
+        if let Some(&start) = pts.first() {
+            pts.push(start);
         }
-        ElementKind::Symbol { .. } | ElementKind::Text(_) | ElementKind::Camera | ElementKind::Group { .. } => None,
-    })
+        return PathWalk::new(&pts);
+    }
+    let mut rest: Vec<Vec<Vec2>> = lines.filter(|l| !l.closed).map(|l| l.points).collect();
+    // Grow the path at its end, then at its start, one line at a time (each line is used once,
+    // so this ends after at most `MAX_GUIDE_LINES` joins).
+    let near = |a: Vec2, b: Vec2| a.distance(b) <= GUIDE_JOIN;
+    while let (Some(&head), Some(&tail)) = (pts.first(), pts.last()) {
+        let join = rest.iter().enumerate().find_map(|(i, l)| {
+            let (a, b) = (*l.first()?, *l.last()?);
+            // (which line, joins at the path's end, the line runs backwards)
+            if near(tail, a) {
+                Some((i, true, false))
+            } else if near(tail, b) {
+                Some((i, true, true))
+            } else if near(head, b) {
+                Some((i, false, false))
+            } else if near(head, a) {
+                Some((i, false, true))
+            } else {
+                None
+            }
+        });
+        let Some((i, at_end, backwards)) = join else { break };
+        let mut line = rest.swap_remove(i);
+        if backwards {
+            line.reverse();
+        }
+        if at_end {
+            pts.extend(line.into_iter().skip(1));
+        } else {
+            line.pop();
+            line.extend(pts);
+            pts = line;
+        }
+    }
+    PathWalk::new(&pts)
 }
 
 /// The tweened transform `tw` moved onto the guide: its origin travels from the point on the
@@ -505,7 +749,7 @@ fn follow(g: &PathWalk, orient: bool, from: &Affine, to: &Affine, t: f32, tw: Af
     if out.is_finite() { out } else { tw }
 }
 
-fn eval_timeline(doc: &Document, tl: &Timeline, frame: u32, cx: &Ctx, out: &mut DisplayList, play: Option<&Play<'_>>) {
+fn eval_timeline(doc: &Document, tl: &Timeline, frame: u32, cx: &Ctx<'_>, out: &mut DisplayList, play: Option<&Play<'_>>) {
     if cx.depth > MAX_SYMBOL_DEPTH {
         return;
     }
@@ -526,6 +770,9 @@ fn eval_timeline(doc: &Document, tl: &Timeline, frame: u32, cx: &Ctx, out: &mut 
     // Deepest first, ties in timeline order (ADR 0082); depth belongs to a scene's own layers.
     // (Only sorted when some layer has a depth: nested timelines allocate nothing.)
     let sorted = (cx.depth == 0 && tl.layers.iter().any(|l| l.has_depth())).then(|| tl.draw_order(frame));
+    // Each layer's space (ADR 0113): a layer with a parent layer is placed by that layer's
+    // lead object at this frame. (Only worked out when some layer has a parent.)
+    let rig = tl.has_rig().then(|| tl.rig_spaces(frame, doc.stage.fps));
     let n = tl.layers.len();
     for k in 0..n {
         let index = sorted.as_ref().map_or(n - 1 - k, |o| o.get(k).copied().unwrap_or(n));
@@ -546,7 +793,7 @@ fn eval_timeline(doc: &Document, tl: &Timeline, frame: u32, cx: &Ctx, out: &mut 
         let guide = cx.guide || is_guide;
         // A layer guided by a guide layer: its tweens follow the guide's first path.
         let walk = layer.parent.and_then(|p| tl.layer(p)).filter(|g| g.kind == LayerKind::Guide).and_then(|g| guide_walk(g, frame));
-        let Some((kf_start, elements)) = evaluate_shown(layer, frame, walk.as_ref(), doc.stage.fps) else { continue };
+        let shown = evaluate_shown(layer, frame, walk.as_ref(), doc.stage.fps);
         let layer_outline = cx.outline.or(if layer.outline && cx.stage { Some(layer.color) } else { None });
         // Through a camera, each layer is placed by the camera and its own depth (an attached
         // layer stays put); a layer the camera has passed isn't drawn.
@@ -557,7 +804,52 @@ fn eval_timeline(doc: &Document, tl: &Timeline, frame: u32, cx: &Ctx, out: &mut 
             },
             None => cx.xf,
         };
+        let layer_xf = match rig.as_ref().and_then(|r| r.get(index)) {
+            Some(space) => layer_xf.mul(space),
+            None => layer_xf,
+        };
+        // A reference video (ADR 0116) goes under the layer's artwork: a placeholder with no
+        // paint, marked as guide artwork, so it is in no movie and no export. The stage alone
+        // fills it with the video's frame. Only on the timeline being looked at, never through
+        // a symbol or in mask artwork.
+        if let Some(v) = layer.video.as_deref().filter(|v| cx.depth == 0 && masks.is_none() && v.time_at(frame, doc.stage.fps).is_some()) {
+            out.items.push(DisplayItem {
+                path: Arc::new(Path::rect(0.0, 0.0, v.width as f32, v.height as f32)),
+                transform: layer_xf.mul(&v.transform),
+                fill: None,
+                stroke: None,
+                fill_rule: FillRule::NonZero,
+                color: ColorTransform::alpha(tl.layer_opacity(index)),
+                layer: layer.id,
+                element: v.id,
+                outline: None,
+                clip: None,
+                masks: None,
+                guide: true,
+                group: None,
+                image: None,
+                smooth: true,
+                warp: None,
+            });
+        }
+        let Some((kf_start, elements)) = shown else { continue };
+        // Data bindings (ADR 0118): a table's column in place of a bound instance's property.
+        let elements = doc.bound_elements(elements, frame);
         let lc = LayerCtx { layer, frame, kf_start, clip, masks, guide, outline: layer_outline, xf: layer_xf };
+        // A layer below full opacity (its own, or a folder's it is in; ADR 0111) fades as one:
+        // its artwork composites in a group, and the group blends at the layer's opacity, so
+        // its overlapping parts don't show through each other. Mask artwork ignores opacity,
+        // and guide artwork is never in the movie; an empty frame needs no group.
+        let fade = if masks.is_none() && !guide && !elements.is_empty() { tl.layer_opacity(index) } else { 1.0 };
+        let faded;
+        let cx = if fade < 1.0 - 1e-4 {
+            let gid = out.groups.len() as u32;
+            out.groups.push(Group { parent: cx.group, alpha: fade, blend: crate::BlendMode::Normal, filters: Arc::from(Vec::new()), clip });
+            faded = Ctx { group: Some(gid), ..*cx };
+            &faded
+        } else {
+            cx
+        };
         for el in elements.iter() {
             eval_element(doc, cx, &lc, el, out, play);
         }
@@ -579,7 +871,11 @@ struct LayerCtx<'a> {
     xf: Affine,
 }
 
-fn eval_element(doc: &Document, cx: &Ctx, lc: &LayerCtx<'_>, el: &Element, out: &mut DisplayList, play: Option<&Play<'_>>) {
+fn eval_element(doc: &Document, cx: &Ctx<'_>, lc: &LayerCtx<'_>, el: &Element, out: &mut DisplayList, play: Option<&Play<'_>>) {
+    // Every element drawn counts, however deep: see MAX_EVAL_ELEMENTS.
+    if !spend(cx.work) {
+        return;
+    }
     let LayerCtx { layer, frame, kf_start, clip, masks, guide, outline: layer_outline, xf: layer_xf } = *lc;
     // In the player, a symbol instance has its own path, and maybe properties a script set.
     let child = match (&el.kind, play) {
@@ -641,6 +937,17 @@ fn eval_element(doc: &Document, cx: &Ctx, lc: &LayerCtx<'_>, el: &Element, out: 
             });
         }
         ElementKind::Text(t) => {
+            // Text with filters draws on its own, as a movie clip does (ADR 0099): its items
+            // composite in a group the filters run on, and the group fades at the text's alpha.
+            // (Mask artwork takes neither.)
+            let (color, group) = if masks.is_none() && crate::filter::any_active(&t.filters) {
+                let gid = out.groups.len() as u32;
+                out.groups.push(Group { parent: cx.group, alpha: fx.alpha_factor().unwrap_or(1.0), blend: crate::BlendMode::Normal, filters: crate::filter::active(&t.filters).into(), clip });
+                let inner = if fx.alpha_factor().is_some() { fx.without_alpha() } else { fx };
+                (cx.color.concat(&inner), Some(gid))
+            } else {
+                (color, cx.group)
+            };
             let item = |path: Arc<Path>, transform: Affine, fill: Option<Paint>, stroke: Option<Stroke>, clip: Option<u32>, masks: Option<u32>| DisplayItem {
                 path,
                 transform,
@@ -654,7 +961,7 @@ fn eval_element(doc: &Document, cx: &Ctx, lc: &LayerCtx<'_>, el: &Element, out: 
                 clip,
                 masks,
                 guide,
-                group: cx.group,
+                group,
                 image: None,
                 smooth: true,
                 warp: None,
@@ -665,10 +972,11 @@ fn eval_element(doc: &Document, cx: &Ctx, lc: &LayerCtx<'_>, el: &Element, out: 
                     let live = child.as_ref().map(|c| (c.state.fields.get(&c.path), c.state.focus.as_deref() == Some(c.path.as_slice())));
                     field_items(t, f, live, xf, clip, out, item);
                 }
-                _ => {
-                    let path = child.as_ref().and_then(|c| c.state.fields.get(&c.path)).and_then(|s| s.look.as_ref()).map_or_else(|| t.outline.clone(), |l| l.outline.clone());
-                    out.items.push(item(path, xf, Some(Paint::Solid(t.color)), None, clip, masks));
-                }
+                _ => match child.as_ref().and_then(|c| c.state.fields.get(&c.path)).and_then(|s| s.look.as_ref()) {
+                    Some(l) => out.items.push(item(l.outline.clone(), xf, Some(Paint::Solid(t.color)), None, clip, masks)),
+                    // One item per colour (ADR 0085), with its link.
+                    None => text_fills(t, out, |path, color| item(path, xf, Some(Paint::Solid(color)), None, clip, masks)),
+                },
             }
         }
         ElementKind::Camera => {}
@@ -725,9 +1033,20 @@ fn eval_element(doc: &Document, cx: &Ctx, lc: &LayerCtx<'_>, el: &Element, out: 
             };
             // A symbol with 9-slice guides, scaled: its shapes are sliced (ADR 0055).
             let slice = crate::nine_slice::slicing(doc, sym, &el.transform).map(|s| Slicing { post: layer_xf.mul(&s.post), ..s });
-            let inner = Ctx { xf, color, depth: cx.depth + 1, root: Some((root_layer, root_el)), outline: layer_outline, stage: cx.stage, clip, masks, guide, group, camera: None, slice };
+            let inner = Ctx { work: cx.work, xf, color, depth: cx.depth + 1, root: Some((root_layer, root_el)), outline: layer_outline, stage: cx.stage, clip, masks, guide, group, camera: None, slice };
             eval_timeline(doc, &sym.timeline, local, &inner, out, child.as_ref());
         }
+    }
+}
+
+/// A text block's authored outline as items, one per colour piece (ADR 0085), recording the
+/// links of pieces that have one.
+fn text_fills(t: &crate::TextBlock, out: &mut DisplayList, item: impl Fn(Arc<Path>, Rgba) -> DisplayItem) {
+    for (color, url, path) in t.fill_paths() {
+        if !url.is_empty() {
+            out.links.push((out.items.len() as u32, Arc::from(url)));
+        }
+        out.items.push(item(path, color));
     }
 }
 
@@ -769,13 +1088,15 @@ fn field_items(t: &crate::TextBlock, f: &crate::TextField, live: Option<(Option<
     }
     // The text: laid out by the player when it changed, else the authored outline (a field whose
     // text changed but couldn't be laid out shows none).
-    let outline = match (state.and_then(|s| s.text.as_ref()), look) {
-        (_, Some(l)) => Some(l.outline.clone()),
-        (None, None) => Some(t.outline.clone()),
-        (Some(_), None) => None,
-    };
-    if let Some(path) = outline {
-        out.items.push(item(path, text_xf, Some(Paint::Solid(t.color)), None, Some(inner), None));
+    match (state.and_then(|s| s.text.as_ref()), look) {
+        (_, Some(l)) if !l.pieces.is_empty() => {
+            for (color, piece) in l.pieces.iter() {
+                out.items.push(item(piece.clone(), text_xf, Some(Paint::Solid(*color)), None, Some(inner), None));
+            }
+        }
+        (_, Some(l)) => out.items.push(item(l.outline.clone(), text_xf, Some(Paint::Solid(t.color)), None, Some(inner), None)),
+        (None, None) => text_fills(t, out, |path, color| item(path, text_xf, Some(Paint::Solid(color)), None, Some(inner), None)),
+        (Some(_), None) => {}
     }
     // The caret, in an input field with the keyboard and nothing selected.
     if let (true, Some(st), crate::TextKind::Input) = (focused, state, f.kind)
@@ -829,3 +1150,7 @@ fn sliced_shape(s: &Shape, own: &Affine, sl: &Slicing) -> (Arc<Path>, Affine, Op
 #[cfg(test)]
 #[path = "eval_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "pivot_tests.rs"]
+mod pivot_tests;

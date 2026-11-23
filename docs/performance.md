@@ -75,6 +75,26 @@ is unchanged (the onion tests compare items and pixels). The settings are part o
 key, so the frame cache keeps working: looking at the same frame again is 40 hits in 0.02 ms,
 and other settings are other pictures.
 
+**Strokes as one outline (2026-11-17, ADR 0110).** The stroker used to hand the rasterizers a
+quad per segment and a disc or fan per bend, whose overlaps made edge pixels too dark. It now
+builds one outline per run of segments and unites them (`anicraft_geom::polygons::union`, about
+60 ns an edge on an outline that is already nearly clean; uniting the old pieces would have
+cost 1.6 ms for one wide curve). The stroker itself is about three times slower (a wide curve:
+20 → 60 µs) and the rasterizers get 3 to 4 times fewer edges. CPU oracle, median of 80
+renders, 32 threads, before → after:
+
+| Scene | Edges | Before | After |
+|---|---|---|---|
+| 2,000 outlined ovals, stars and rounded rectangles, 1920 × 1080 | 703,000 → 254,000 | 9.3 ms | 9.0 ms |
+| The demo scene, 1280 × 720 | 1,345 → 767 | 2.5 ms | 2.6 ms |
+| Seven tangled lines (waves, dashes, a knot, a hairpin), 400 × 300 | 4,995 → 1,347 | 0.51 ms | 0.63 ms |
+| The same at 300 % | 12,341 → 2,284 | 2.5 ms | 2.65 ms |
+| 300 self-crossing scribbles, 1280 × 720 | 499,000 → 126,000 | 5.9 ms | 6.4 ms |
+
+Convex closed outlines (rectangles, ovals, rounded rectangles) and straight lines skip the
+union: their outline can't overlap. Output changes only at stroke edges (14 corpus goldens
+regenerated; ADR 0110 lists what changed).
+
 **Outlines as hairlines (2026-11-10, ADR 0048).** Outline mode drew half-pixel strokes (four
 edges per segment and a disc at every bend); it now draws hairlines, one edge per segment,
 covered by distance. Same test, same machine:
@@ -215,6 +235,32 @@ Vulkan only. With CPU binning, DX12's onion outlines take 10.1 ms in tiles again
 The CPU stage (the oracle through the render service's 256 px tiles, `onion_timings`, best of
 frames 12, 30 and 48) with hairlines: onion ±5 outlines **17.1 ms** against 14.8 tinted at
 1080p (was 34–39 against 16.2–17.2).
+
+### Gradient selection stipple (#295)
+
+The selection overlay inverts the artwork's 256-entry gradient ramp with alpha ignored. It
+checks the colour range and midpoint of each 64-device-pixel strip before testing the pixels
+covered by dots. Sharp lookup transitions and a possible radial minimum inside a strip trigger
+refinement. One frame shares a limit of 131,072 pixel probes and 16,384 extra rectangles over
+all gradient fills. Each fill reserves some of its allowance for later scanline spans.
+
+After a span or frame uses its allowance, the remaining strips blend their corner colours.
+This keeps the entire selected area covered. Some narrow transitions can be softened or missed
+on busy fills. Features missing from the artwork's lookup table also stay out of the stipple.
+
+Two optimized CPU benchmark runs used identical pre-clipped 3840 × 2160 spans, with 31 timed
+mesh builds per implementation after warm-up. The 14-stop elliptical radial had an offset
+focal point, two clusters of close stops, a 31° rotation, and non-uniform scale. Times are the
+range of the two medians and include mesh allocation. Span preparation and drawing are outside
+the timings.
+
+| Spread | Original mesh | Pixel-by-pixel adaptive mesh | Bounded mesh |
+|---|---:|---:|---:|
+| Pad | 32,460 rectangles, 9.1–10.7 ms | 54,992 rectangles, 106.2–126.2 ms | 48,405 rectangles, 10.5–12.3 ms |
+| Reflect | 32,460 rectangles, 15.2–18.9 ms | 68,675 rectangles, 211.2–225.2 ms | 48,844 rectangles, 18.5–22.1 ms |
+
+The bounded mesh took 1.15–1.21× the original CPU time in these runs. The reflected fill can
+still exceed a 60 fps frame budget on this machine.
 
 ### How budgets are enforced
 

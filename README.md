@@ -182,8 +182,12 @@ and answers with its status, `{"id": 1, "ok": true, "result": {}, "revision": 7,
 Register the MCP server with Claude Code:
 
 ```sh
-claude mcp add anicraft -- /path/to/anicraft-cli mcp
+claude mcp add anicraft -- /path/to/anicraft-cli mcp \
+  --automation-read-root /path/to/project --automation-write-root /path/to/project
 ```
+
+The two folders are required: the assistant's commands read files only inside the first and
+write only inside the second.
 
 The details, including the server entry for other MCP clients, are in [`docs/mcp.md`](docs/mcp.md).
 
@@ -193,11 +197,10 @@ The details, including the server entry for other MCP clients, are in [`docs/mcp
 > **Early alpha: not yet for production animation work.** The core document model, vector renderer,
 > egui shell, classic and shape tweens, and the first XFL and SVG imports work; much is still to come.
 
-[**docs/roadmap.md**](docs/roadmap.md) has the honest status by dimension, milestones M0–M8 and what's next.
+[**docs/roadmap.md**](docs/roadmap.md) has the prioritised backlog, where every open pull request fits, and the honest status by dimension; [**docs/parity.md**](docs/parity.md) compares AniCraft with the reference app feature by feature.
 
-**What's missing:** audio layers, ActionScript beyond the timeline subset (frame scripts
-are kept, and those that control the timeline run; ADR 0013), motion tweens from XFL, a GPU renderer, and macOS and Linux CI runners
-(AniCraft is verified on Windows so far).
+**What's missing:** ActionScript beyond the timeline subset (frame scripts are kept, and those
+that control the timeline run; ADR 0013), and motion tweens from XFL.
 
 **Workspace:** strict downward-only layering, checked by `cargo test`:
 

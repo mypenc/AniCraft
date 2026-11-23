@@ -12,6 +12,7 @@ On a Mac, read **⌘** wherever this chapter says **Ctrl**, and **⌥** for **Al
 | Images | PNG, JPEG | A bitmap in the Library, placed on the stage as a bitmap |
 | Drawings | SVG | Editable shapes, groups, gradients, masks and text |
 | Sounds | WAV, Ogg Vorbis, MP3 | A sound in the Library, played from a keyframe |
+| Video | MP4, MOV, WebM, MKV, AVI and whatever else your ffmpeg reads | Frames on a layer, or a reference layer to trace over |
 
 Anything else is turned away with one line in the status bar that says what AniCraft takes.
 
@@ -56,6 +57,35 @@ To show a different image in the same place, select the placed bitmap and use **
 **Bitmap** row of **Properties**. Pick another bitmap from the list. A placed bitmap keeps its
 position and transform and takes the new image's size; a shape painted with a bitmap fill keeps
 its outline and shows the new image inside it. With several bitmaps selected, they all change.
+
+### Trace Bitmap
+
+To turn a picture into shapes you can edit, select the placed bitmap and choose **Modify ›
+Bitmap › Trace Bitmap…**. Each area of colour becomes a filled shape in its place, as one undo
+step, and the shapes are selected. Pixels under half opacity stay empty.
+
+* **Colour threshold** (1 to 500, default 100): neighbouring pixels whose colours differ by less
+  than this are one colour. Raise it for fewer, larger shapes.
+* **Minimum area** (1 to 1000 pixels, default 8): smaller areas join the neighbour they share the
+  most edge with, which clears specks.
+* **Curve fit**: how closely the outlines follow the pixels, from **Pixels** (exactly along the
+  pixel edges) through **Very Tight**, **Tight**, **Normal** and **Smooth** to **Very Smooth**.
+* **Corner threshold**: **Many corners** keeps more sharp turns, **Few corners** smooths more of
+  them.
+
+The shapes are raw shapes made of lines and quadratic curves, and they fit together without gaps.
+Where raw shapes on the same layer touch them, they merge as any drawing does. A large photo at a
+low threshold makes a great many shapes; the trace stops at 20,000 and asks for a higher
+threshold or minimum area. A picture that is nearly all speckle (more than two million separate
+areas of colour) is refused the same way. A bitmap of up to 4096 × 4096 pixels can be traced; a
+large one can take a few seconds.
+
+### Convert to Bitmap
+
+**Modify › Convert to Bitmap** draws the selection, as it looks at the playhead, into a new
+bitmap in the Library (named **Bitmap 1**, **Bitmap 2**, …) and puts that bitmap where the
+selection was, on the topmost of its layers. The bitmap covers the selection's bounds on whole
+pixels, at one pixel per stage unit, up to 4096 × 4096 pixels. Undo brings the artwork back.
 
 ## Importing SVG drawings
 
@@ -132,6 +162,84 @@ In the Library, select a sound to see its waveform with a play button. Drag it o
 put it on the active layer's keyframe, or use **Place on Timeline**. Deleting a sound that
 keyframes use asks first, and you can undo it.
 
+## Importing video
+
+Use video as reference: trace over film (rotoscoping), or keep footage under your drawing to
+match its timing.
+
+AniCraft reads video with **ffmpeg**, a free program you install yourself. AniCraft has no video
+decoder of its own, so nothing happens to your files that ffmpeg doesn't do. It is the same
+ffmpeg that **Export Video** uses. If it isn't installed, the Import Video window says so: get it
+from ffmpeg.org or your system's package manager so it is on your `PATH`, or set the environment
+variable `ANICRAFT_FFMPEG` to the full path of the `ffmpeg` program.
+
+1. Move the playhead to the frame where the video should start.
+2. Choose **File › Import › Import Video…** and pick the file.
+3. The window shows the video's size, length and frame rate. Choose how to bring it in:
+
+| Import as | What you get | Use it when |
+|---|---|---|
+| **Frames in the document** | The frames become bitmaps on a new layer, one keyframe each, with the sound on a layer below | The clip is short and should be part of the movie |
+| **Reference layer for tracing** | A locked guide layer, right under the layer you are on, that shows the video beneath what you draw | You trace or time against footage that should not be exported |
+
+4. Press **Import** (or **Add Reference Layer**).
+
+For a long or large video the window starts on **Reference layer**, which costs nothing in the
+document.
+
+### Frames in the document
+
+Each frame of the video lands on its own keyframe at the document's frame rate. A 2-second clip
+in a 24 fps document gives 48 keyframes, whatever the video's own frame rate was.
+
+| Option | What it does |
+|---|---|
+| **Start at** | Seconds into the video to begin at |
+| **Length** | Seconds of video to take; 0 takes it to the end |
+| **Frame step** | One picture every this many frames. **2** animates on twos: half the pictures, each held for two frames |
+| **Largest size** | The pictures' longest edge in pixels. A smaller video is never enlarged |
+| **Import the sound track** | The video's sound goes on a layer of its own as a stream sound, so it keeps time with the frames |
+
+Under the options the window says what will come in, for example
+`48 pictures of 1280 × 720 from frame 1, about 169 MB in memory while you edit`. One import takes
+at most 2000 pictures or 1 GB of pictures. If the video is longer, the window tells you before
+you start that the rest will be left out. Raise the frame step, lower the size or shorten the
+length to fit more of it, or use a reference layer.
+
+While ffmpeg reads the frames a progress window shows how far it is. **Cancel** stops it and
+leaves the document exactly as it was. The whole import is one undo step.
+
+The pictures are kept in a Library folder named after the video. They are ordinary bitmaps: you
+can delete keyframes you don't need, swap a bitmap, or trace one into shapes on a layer above.
+
+### A reference layer for tracing
+
+The video shows on the stage under your artwork and follows the playhead as you scrub and play.
+The layer goes right under the layer you are on (under its folder, if it is in one), so what you
+draw sits on the video and artwork further down, such as a background, stays behind it. Drag
+the layer up or down like any other. It is a **guide layer**, so it is never in the movie, in Test Movie or in any export. It is
+locked, so you can't draw on it by mistake. Draw on the layers above it.
+
+* **Fade it**: double-click the layer's icon to open **Layer Properties** and lower **Opacity**.
+* **Hide it**: click the layer's eye, as for any layer.
+* **The file moved**: the stage shows an outline where the video was and the status bar says
+  the file is missing. Open **Layer Properties** and choose **Relink…** to pick it again.
+* **Remove it**: **Remove Video** in Layer Properties, or delete the layer.
+
+The video stays a file on your computer. The document remembers only where it is, so keep the
+file where it was, or relink it. Frames are read as you go and kept within 256 MB of memory;
+the first time you jump to a new place the picture arrives a moment later.
+
+### What video import doesn't do yet
+
+* Hearing the video's sound with a reference layer. Import the frames with sound, or import the
+  sound file to its own layer.
+* Moving, scaling or cropping the reference on the stage. It is centred at the video's own
+  size, or fitted to the stage if it is larger.
+* Transparent video. Frames come in opaque.
+* Importing video in the web version, which can't run ffmpeg. Import the frames as PNG images
+  instead.
+
 ## Sounds on keyframes
 
 As in Animate, a sound belongs to a keyframe. Select the keyframe and open the **Sound** rows
@@ -186,6 +294,95 @@ A layer that holds sounds has a **Volume** (0–100 %) and **Mute** in **Propert
 speaker toggle in its timeline row. Volume applies to the layer's sounds and to sounds inside
 the symbols on it. A muted layer is silent while you work and in every export, which is handy
 while you time other tracks.
+
+## Convert Audio to Keyframes
+
+A sound can animate for you. **Convert Audio to Keyframes** measures how loud the sound is on
+each frame and writes that onto a property of an object: a speaker that pulses with the beat, a
+logo that brightens on every hit, a jaw that drops when a character talks.
+
+![Convert Audio to Keyframes: the star's scale follows a beat, previewed on the timeline](images/audio-to-keyframes.png)
+
+1. Put the sound on a layer and the object on another layer. **Stream** sync is best: the
+   sound then stays on its frames. With Event or Start sync the dialog still works, and a line
+   under **Frames** reminds you that the keys can drift from what is heard after a jump on the
+   timeline.
+2. Choose **Modify › Timeline › Convert Audio to Keyframes…**, or select the sound's keyframe
+   and press **To Keyframes…** in **Properties**.
+3. Pick the **Layer** that gets the keys (and the **Object**, when the layer holds several).
+4. Pick the **Property**, and its value **In silence** and **At the loudest**:
+
+   | Property | The values are |
+   |---|---|
+   | **Scale**, **Scale X**, **Scale Y** | percent of the object's own size (100 % is as it is) |
+   | **Alpha** | opacity in percent |
+   | **X offset**, **Y offset** | pixels from where the object is (negative Y is up) |
+   | **Rotation** | degrees from how the object is turned |
+   | **First frame** | a frame of a graphic symbol: louder shows a later frame, held as a single frame |
+
+5. Shape the movement:
+   * **Threshold** ignores everything quieter than this share of the loudest frame. Raise it
+     so background noise doesn't make the object tremble, or so only the loud beats count.
+   * **Smoothing** averages each frame with the frames either side. 0 follows every flick;
+     higher values are calmer. The beat stays on its frame.
+   * **Channel** (stereo sounds) measures the left side, the right side or both.
+   * **Key every** 2 frames animates on twos, and so on.
+6. Choose what to **Write**: **Keyframes** on the layer, as if you had set each by hand, or a
+   **Motion tween curve**, which keeps the span whole and shows in the Motion Editor (a motion
+   tween is made for an object alone on its layer).
+7. Press **OK**. It is one undo step.
+
+Everything is previewed while you change it. The graph shows the sound's loudness frame by
+frame, the threshold, the value the keys will follow (the white line) and a tick where each
+key lands; the stage and the timeline show the keys themselves. Click or drag in the graph to
+see another frame on the stage. Clear **Preview** to compare with the document as it was.
+
+Scale and rotation turn about the object's transformation point (the middle of a shape that
+has none). Keyframes that were already on the layer keep their place and take the value. After
+the sound ends, the layer carries on as it was. A layer shorter than the sound grows to its
+length.
+
+## Auto lip-sync
+
+**Auto Lip-Sync** listens to speech and picks a mouth for every frame, as Animate's Lip Syncing
+does. It is a first pass: expect to fix some mouths by hand afterwards.
+
+![A mouth lip-synced to speech: a keyframe on the Mouth layer wherever the mouth changes](images/lip-sync.png)
+
+1. Draw the mouths as the frames of a **graphic symbol**, one frame per mouth, and put an
+   instance on its own layer. **File › New from Template › Lip-sync mouth chart** gives you a
+   Mouth symbol with ten labelled frames to redraw.
+2. Put the dialogue on another layer, with **Stream** sync.
+3. Select the mouth and press **Lip Sync…** in **Properties** (beside Looping), or choose
+   **Modify › Timeline › Auto Lip-Sync…**.
+4. Check the **Mouths**. AniCraft tells five mouth shapes apart and needs a frame of your
+   symbol for each:
+
+   | Mouth | Sounds | Frame label it looks for |
+   |---|---|---|
+   | **Rest** | silence | Rest |
+   | **Open** | ah, as in *father* and *cat* | AI |
+   | **Wide** | ee and e, and the hiss of s and t | E |
+   | **Round** | oh, oo and w | O |
+   | **Closed** | m, b, p and the short stops between syllables | MBP |
+
+   Frames are found by their labels (other common names such as *open*, *wide*, *round* and
+   *closed* work too). Choose another frame for any mouth from its menu.
+5. **Silence below** sets how quiet counts as silence. **Hold each mouth** is the fewest frames
+   a mouth stays, so it doesn't flicker; closed lips are kept however short.
+6. Press **OK**. The Mouth layer gets a keyframe wherever the mouth changes, each showing one
+   frame of the symbol (**Single frame**). It is one undo step.
+
+The preview shows a row for each mouth with the frames it gets, under the sound's loudness.
+
+How it listens: no speech recognition and nothing sent anywhere. Each frame's sound is sorted
+by where its energy lies (low for *oo*, in the middle for *ah*, high for *ee* and *s*), which is
+what tells vowels apart. It cannot tell *f* from *s* or *l* from *d*, so the chart's other mouths
+(FV, L, WQ, U and the consonants) are yours to place. The same sound always gives the same
+keys.
+
+To fix a mouth afterwards, select its keyframe and change **First frame** in Properties, or
+move the keyframe on the timeline.
 
 ## Sounds inside symbols and buttons
 
@@ -242,4 +439,8 @@ Lottie animations carry no sound. See [Exporting and Publish](exporting-and-publ
 
 * Picking a colour from a bitmap's pixels with the Eyedropper.
 * Panning beyond what the envelope does.
-* Sound playback in the web version.
+* Convert Audio to Keyframes on the camera or an armature layer, a filter's values, or with a
+  classic tween between the keys; the sound's own effect (a fade) isn't counted in its
+  loudness.
+* Lip-sync that tells more mouths apart (F and V, L, the chart's other consonants), or reads a
+  script; lip-syncing several sounds in one go.

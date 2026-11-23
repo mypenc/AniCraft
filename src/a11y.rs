@@ -443,7 +443,7 @@ mod tests {
         for tool in [Tool::Bone, Tool::Bind, Tool::Warp, Tool::Rect, Tool::Star, Tool::Text, Tool::Pencil, Tool::Brush, Tool::PaintBrush, Tool::Eraser, Tool::PaintBucket, Tool::InkBottle, Tool::Eyedropper, Tool::Pen] {
             found.extend(check(&format!("{tool:?} tool"), |a, _| a.tool = tool));
         }
-        for panel in ["select", "motion", "motionspan", "motionpath", "motionpoints", "motionedit", "motionpins", "motionpinsspan", "rawsub", "camera", "cameraview", "bones", "springbones", "shapebones", "shapeweights", "warp", "sound", "envelope", "prefs", "shortcuts", "palette", "about", "files", "licenses", "confirm", "recovery", "frames", "actions", "script", "scriptproblems", "testscript", "onion", "onionmenu", "editmultiple", "library", "librarymenu", "edittransform", "onionsymbol", "layerprops", "frameview", "layercolour", "timelinepolish", "convert", "mixed", "bitmap", "nineslice", "nineslicedit", "find", "explorer", "publish", "publishreport", "publishanim", "start", "drop", "droplibrary", "testmovie", "testmovieinside", "templates", "savetemplate", "droptimeline", "textfields", "testtext", "softmask", "pathtext", "gradient", "gradientbucket", "swatches", "swatchpanel", "brushlibrary", "brushcurve", "paintbrush"] {
+        for panel in ["select", "motion", "motionspan", "motionpath", "motionpoints", "motionedit", "motionpins", "motionpinsspan", "rawsub", "camera", "cameraview", "bones", "springbones", "shapebones", "shapeweights", "mixedbones", "warp", "sound", "envelope", "audiokeys", "audiokeysevent", "lipsync", "datachart", "datatable", "prefs", "shortcuts", "palette", "about", "files", "licenses", "confirm", "recovery", "frames", "actions", "script", "scriptproblems", "testscript", "onion", "onionmenu", "editmultiple", "library", "librarymenu", "edittransform", "onionsymbol", "layerprops", "layeropacity", "pivot", "frameview", "layercolour", "timelinepolish", "convert", "mixed", "bitmap", "nineslice", "nineslicedit", "find", "explorer", "publish", "publishreport", "publishanim", "start", "drop", "droplibrary", "testmovie", "testmovieinside", "templates", "savetemplate", "droptimeline", "textfields", "testtext", "richtext", "softmask", "pathtext", "gradient", "gradientbucket", "swatches", "swatchpanel", "brushlibrary", "brushcurve", "paintbrush", "videoimport"] {
             found.extend(check(panel, |a, _| a.open_panel(Some(panel))));
         }
         // Every panel in front where it docks, and floating (ADR 0075); the other workspaces.
@@ -471,6 +471,7 @@ mod tests {
             a.open_panel(Some("testmovie"));
         }));
         // The layer depth row shows on artwork layers once the scene has a camera.
+        found.extend(check("parenting view", |a, _| a.open_panel(Some("parenting"))));
         found.extend(check("layer depth", |a, _| {
             a.open_panel(Some("camera"));
             a.run("layer.select", serde_json::json!({"index": 1}));
@@ -670,6 +671,49 @@ mod tests {
         assert_eq!(crate::menus::access_keys(&["Fichier", "Édition", "Ändern", "日本"]), vec![Some((0, 'F')), Some((1, 'D')), Some((1, 'N')), None]);
     }
 
+    /// #455: once a menu is open, pointing at another title opens that menu; leaving the bar
+    /// keeps the open one, and with no menu open, pointing at a title opens nothing.
+    #[test]
+    fn an_open_menu_follows_the_pointer_along_the_bar() {
+        use egui::{Event, PointerButton};
+        let (_, mut app, ctx) = tree(|_, _| {});
+        let tops = app.menu_keys.top_ids().to_vec();
+        let open = |ctx: &egui::Context| -> Vec<usize> { (0..tops.len()).filter(|i| egui::Popup::is_id_open(ctx, tops[*i].with("popup"))).collect() };
+        let at = |ctx: &egui::Context, i: usize| ctx.read_response(tops[i]).map(|r| r.rect.center()).unwrap_or_else(|| panic!("menu {i} was not drawn"));
+        let events = |ctx: &egui::Context, app: &mut App, events: Vec<Event>| {
+            frame(ctx, app, egui::RawInput { events, ..input(1.0) });
+            frame(ctx, app, input(1.0));
+        };
+        let move_to = |ctx: &egui::Context, app: &mut App, to: egui::Pos2| {
+            let from = ctx.input(|i| i.pointer.hover_pos()).unwrap_or(to + egui::vec2(0.0, 300.0));
+            for step in 1..=4 {
+                events(ctx, app, vec![Event::PointerMoved(from + (to - from) * (step as f32 / 4.0))]);
+            }
+        };
+        let button = |pos: egui::Pos2, pressed: bool| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        // No menu open: the pointer over the titles opens nothing.
+        let (file, edit, window) = (at(&ctx, 0), at(&ctx, 1), at(&ctx, 7));
+        move_to(&ctx, &mut app, file);
+        move_to(&ctx, &mut app, edit);
+        assert_eq!(open(&ctx), Vec::<usize>::new());
+        // Click File, then roll over Edit and Window: each opens in turn.
+        move_to(&ctx, &mut app, file);
+        events(&ctx, &mut app, vec![button(file, true)]);
+        events(&ctx, &mut app, vec![button(file, false)]);
+        assert_eq!(open(&ctx), [0], "a click opens File");
+        move_to(&ctx, &mut app, edit);
+        assert_eq!(open(&ctx), [1], "Edit opens under the pointer, and File closes");
+        assert!(!app.menu_keys.open_items(&ctx).is_empty(), "with its items");
+        move_to(&ctx, &mut app, window);
+        assert_eq!(open(&ctx), [7]);
+        // Down into the menu, or off the bar: the open menu stays.
+        move_to(&ctx, &mut app, window + egui::vec2(10.0, 60.0));
+        assert_eq!(open(&ctx), [7]);
+        // The arrow keys still move along the bar with the pointer resting where it is.
+        move_to(&ctx, &mut app, at(&ctx, 2));
+        assert_eq!(open(&ctx), [2]);
+    }
+
     #[test]
     fn the_menu_bar_works_from_the_keyboard() {
         if !crate::menus::MenuKeys::available() {
@@ -814,6 +858,89 @@ mod tests {
         app.set_prefs(&ctx, crate::prefs::Prefs { theme: Palette::Light, theme_follows_system: Some(false), ..app.prefs.clone() });
         assert_eq!(ctx.global_style().visuals.widgets.inactive.bg_stroke.color, LIGHT.border);
         crate::theme::apply_palette(&egui::Context::default(), Palette::Graphite);
+    }
+
+    /// Your own themes (ADR 0117), end to end: listed in Preferences with what was refused and
+    /// why, chosen, changed on disk and reloaded in the same frame, never applied in part, and
+    /// exported to start a new one from.
+    #[test]
+    fn your_own_themes_are_listed_chosen_reloaded_and_exported() {
+        use crate::theme::{GRAPHITE, Palette, T, role_colour};
+        let dir = std::env::temp_dir().join(format!("anicraft-themes-shell-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a folder");
+        let plum = |accent: &str| format!(r##"{{"anicraft_theme": 1, "name": "Plum", "author": "Sam", "colors": {{"accent": "{accent}", "icon_accent": "#9a3ce04d"}}}}"##);
+        std::fs::write(dir.join("plum.json"), plum("#9a3ce0")).expect("written");
+        std::fs::write(dir.join("faint.json"), r##"{"anicraft_theme": 1, "name": "Faint", "colors": {"text_dim": "#666670"}}"##).expect("written");
+        let folder = dir.clone();
+        let (t, mut app, ctx) = tree(move |a, ctx| {
+            a.themes_dir = Some(folder);
+            a.reload_themes(ctx);
+            a.open_panel(Some("prefs"));
+        });
+        // Preferences lists both, each named; the refused one can't be picked and says why,
+        // naming the roles; the folder's buttons are there. Everything passes the audit.
+        let says = |t: &TreeUpdate, what: &str| t.nodes.iter().any(|(_, n)| n.label().is_some_and(|l| l.contains(what)) || n.value().is_some_and(|v| v.contains(what)));
+        let named = |t: &TreeUpdate, label: &str| t.nodes.iter().map(|(_, n)| n).find(|n| n.label() == Some(label)).unwrap_or_else(|| panic!("no node named {label}")).clone();
+        assert_eq!(named(&t, "Plum").role(), Role::RadioButton);
+        assert!(!named(&t, "Plum").is_disabled() && named(&t, "faint (refused)").is_disabled());
+        assert!(says(&t, "Your theme, by Sam, from plum.json."));
+        assert!(says(&t, "faint.json is not used. text_dim on panel has a contrast of") && says(&t, "it needs 4.5:1"));
+        for button in ["Open Themes Folder", "Reload", "Export Current Theme"] {
+            assert_eq!(named(&t, button).role(), Role::Button, "{button}");
+        }
+        assert_eq!(audit(&t), Vec::<String>::new());
+        assert!(app.status.as_ref().is_some_and(|s| s.error && s.text.contains("1 refused")), "{:?}", app.status.as_ref().map(|s| &s.text));
+        // Chosen: every token read from here on is the theme's, over its base.
+        let choose = |app: &mut App, ctx: &egui::Context, id: &str| app.set_prefs(ctx, crate::prefs::Prefs { theme_file: Some(id.into()), theme_follows_system: Some(false), ..app.prefs.clone() });
+        choose(&mut app, &ctx, "plum");
+        assert!(crate::theme::user_theme_active());
+        assert_eq!((T.accent, T.accent_end, T.panel), (role_colour(0x9a, 0x3c, 0xe0, 255), role_colour(0x9a, 0x3c, 0xe0, 255), GRAPHITE.panel));
+        assert_eq!(ctx.global_style().visuals.selection.stroke.color, T.accent);
+        // The file changes; Reload shows it at once.
+        std::fs::write(dir.join("plum.json"), plum("#a13fe0")).expect("written");
+        app.reload_themes(&ctx);
+        assert_eq!(T.accent, role_colour(0xa1, 0x3f, 0xe0, 255));
+        // The file breaks: nothing of it is applied, the built-in palette it was based on shows,
+        // and the reason is said. The choice is kept, so mending the file brings it back.
+        std::fs::write(dir.join("plum.json"), plum("#24242a")).expect("written");
+        app.reload_themes(&ctx);
+        assert!(!crate::theme::user_theme_active());
+        assert_eq!(*T, GRAPHITE);
+        assert!(app.status.as_ref().is_some_and(|s| s.error), "the refusal is said");
+        assert_eq!(app.prefs.theme_file.as_deref(), Some("plum"));
+        std::fs::write(dir.join("plum.json"), plum("#9a3ce0")).expect("written");
+        app.reload_themes(&ctx);
+        assert!(crate::theme::user_theme_active() && T.accent == role_colour(0x9a, 0x3c, 0xe0, 255));
+        // Export Current Theme writes every role of the look in use, and lists the file.
+        app.export_theme(&ctx);
+        let exported = crate::theme_file::read(&dir.join("my-theme.json")).expect("the export is a theme");
+        assert_eq!((exported.tokens, exported.name.as_deref()), (*T, Some("Copy of Plum")));
+        assert!(app.themes.get("my-theme").is_some_and(|e| e.theme.is_ok()));
+        app.export_theme(&ctx);
+        assert!(dir.join("my-theme-2.json").is_file(), "a second export never overwrites the first");
+        // A refused theme can't become the look, whatever the preferences say.
+        choose(&mut app, &ctx, "faint");
+        assert!(!crate::theme::user_theme_active());
+        assert!(app.status.as_ref().is_some_and(|s| s.error && s.text.contains("text_dim on panel")), "{:?}", app.status.as_ref().map(|s| &s.text));
+        // A file that is gone: the palette it was based on, and a message.
+        choose(&mut app, &ctx, "plum");
+        std::fs::remove_file(dir.join("plum.json")).expect("removed");
+        app.reload_themes(&ctx);
+        assert!(!crate::theme::user_theme_active() && *T == GRAPHITE);
+        assert!(app.status.as_ref().is_some_and(|s| s.error && s.text.contains("not in the themes folder")));
+        // A built-in palette chosen again forgets the file.
+        let mut p = app.prefs.clone();
+        p.theme = Palette::Light;
+        p.theme_file = None;
+        app.set_prefs(&ctx, p);
+        assert_eq!((crate::theme::palette(), crate::theme::user_theme_active()), (Palette::Light, false));
+        // No folder (a browser, a test): the buttons say so instead of doing anything.
+        app.themes_dir = None;
+        app.export_theme(&ctx);
+        assert!(app.status.as_ref().is_some_and(|s| s.error));
+        crate::theme::apply_palette(&egui::Context::default(), Palette::Graphite);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

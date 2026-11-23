@@ -26,8 +26,7 @@
 //! skewed gradient transforms (approximated).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
-use anicraft_doc::{Cap, Dash, ElementKind, GradientStop, Join, Paint, Rgba, Shape, Spread, Stroke, StrokeStyle, MAX_FOCAL};
-use anicraft_geom::svg::parse_path_data;
+use anicraft_doc::{Cap, Dash, ElementKind, GradientStop, Join, MAX_FOCAL, Paint, Rgba, Shape, Spread, Stroke, StrokeStyle};
 use anicraft_geom::{Affine, FillRule, Path, Rect, Vec2};
 use anicraft_text::{FaceMatch, Fonts};
 use anicraft_xml::Element as X;
@@ -36,7 +35,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 mod clip;
+mod path_data;
 mod text;
+
+pub use path_data::parse_path_data;
 
 #[cfg(test)]
 mod clip_tests;
@@ -59,6 +61,10 @@ pub enum SvgError {
     Xml(#[from] anicraft_xml::XmlError),
     #[error("this is not an SVG drawing (its root element is <{0}>)")]
     NotSvg(String),
+    /// The bytes could not be read as SVG text within the shared limits (SVGZ unpacking, text
+    /// encoding, entity expansion, nesting, attributes).
+    #[error(transparent)]
+    Preflight(#[from] craft_svg::preflight::Error),
 }
 
 /// What could not come across, by kind ("2 images"), and the fonts the text asks for that
@@ -167,7 +173,8 @@ pub fn import_with_fonts(bytes: &[u8], fonts: &Fonts) -> Result<SvgImport, SvgEr
 }
 
 fn import_from(bytes: &[u8], fonts: Option<&Fonts>) -> Result<SvgImport, SvgError> {
-    let root = anicraft_xml::parse_mixed(bytes, TEXT_CONTENT)?;
+    let text = svg_text(bytes)?;
+    let root = anicraft_xml::parse_mixed(text.as_bytes(), TEXT_CONTENT)?;
     if local(&root.name) != "svg" {
         return Err(SvgError::NotSvg(root.name.clone()));
     }
@@ -196,6 +203,32 @@ fn import_from(bytes: &[u8], fonts: Option<&Fonts>) -> Result<SvgImport, SvgErro
     b.children(&root, &base, &style, 1.0, 0, 0);
     let layers = b.layers();
     Ok(SvgImport { width: w, height: h, layers, report: b.report })
+}
+
+/// The document as UTF-8 text: SVGZ unpacked and UTF-16 or Latin-1 decoded within the shared
+/// size limit, and hostile markup (entity bombs, very wide elements, deep nesting) refused before
+/// the XML reader builds a tree. The XML itself is left to `anicraft_xml`, which accepts what
+/// drawing tools write loosely (an undeclared `xlink:` prefix).
+fn svg_text(bytes: &[u8]) -> Result<std::borrow::Cow<'_, str>, SvgError> {
+    use craft_svg::guard;
+    use craft_svg::preflight::{Error, Limits};
+    let limits = Limits::default();
+    let text = craft_svg::svgz::text(bytes, limits.bytes).map_err(Error::from)?;
+    // svgz::text limits the source or inflated bytes, not the UTF-8 length after Latin-1
+    // (or UTF-16) decoding. A 40 MiB Latin-1 file of non-ASCII would become ~80 MiB here.
+    if text.len() > limits.bytes {
+        return Err(Error::Text(craft_svg::svgz::Error::TooLarge(limits.bytes)).into());
+    }
+    if guard::entities_expand_past(&text, limits.entity_bytes) {
+        return Err(Error::Entities.into());
+    }
+    if guard::too_wide(&text, limits.attributes, limits.attribute_work) {
+        return Err(Error::TooWide(limits.attributes).into());
+    }
+    if guard::deeper_than(&text, limits.depth) {
+        return Err(Error::TooDeep(limits.depth).into());
+    }
+    Ok(text)
 }
 
 /// The element's `id`, as an element name.
@@ -264,164 +297,118 @@ fn numbers(s: &str) -> Vec<f32> {
 
 /// A length in user units. `%` is relative to `reference`; `em`/`ex` assume a 16 px font.
 fn length(v: &str, reference: f32) -> Option<f32> {
-    let v = v.trim();
-    // The unit is a known suffix, so exponents ("1e2px") still parse.
-    let units: [(&str, f32); 9] =
-        [("%", reference / 100.0), ("px", 1.0), ("pt", 96.0 / 72.0), ("pc", 16.0), ("mm", 96.0 / 25.4), ("cm", 96.0 / 2.54), ("in", 96.0), ("em", 16.0), ("ex", 8.0)];
-    let (num, k) = units.iter().find_map(|(u, k)| v.strip_suffix(u).map(|n| (n, *k))).unwrap_or((v, 1.0));
-    let n: f32 = num.trim().parse().ok().filter(|n: &f32| n.is_finite())?;
-    Some(n * k).filter(|x| x.is_finite())
+    craft_svg::doc_style::length_strict(v, f64::from(reference)).map(|x| x as f32).filter(|x| x.is_finite())
 }
 
 fn view_box(s: &str) -> Option<Rect> {
-    let n = numbers(s);
-    let (x, y, w, h) = (*n.first()?, *n.get(1)?, *n.get(2)?, *n.get(3)?);
-    (w > 0.0 && h > 0.0).then(|| Rect::new(x, y, x + w, y + h))
+    let ([x, y], w, h) = craft_svg::doc_style::parse_viewbox(s)?;
+    Some(Rect::new(x as f32, y as f32, (x + w) as f32, (y + h) as f32))
 }
 
 /// The viewBox → viewport mapping for `preserveAspectRatio` (default `xMidYMid meet`).
 fn view_box_transform(vb: Rect, w: f32, h: f32, par: &str) -> Affine {
-    let (sx, sy) = (w / vb.width(), h / vb.height());
-    let mut words = par.split_whitespace();
-    let align = words.next().unwrap_or("xMidYMid");
-    if align == "none" {
-        return Affine::scale(sx, sy).mul(&Affine::translate(-vb.min.x, -vb.min.y));
-    }
-    let slice = words.next() == Some("slice");
-    let s = if slice { sx.max(sy) } else { sx.min(sy) };
-    let frac = |key: &str| if align.contains(&format!("{key}Min")) { 0.0 } else if align.contains(&format!("{key}Max")) { 1.0 } else { 0.5 };
-    let tx = (w - vb.width() * s) * frac("x");
-    let ty = (h - vb.height() * s) * frac("Y");
-    Affine::translate(tx, ty).mul(&Affine::scale(s, s)).mul(&Affine::translate(-vb.min.x, -vb.min.y))
+    let c = craft_svg::doc_style::viewbox_transform_with(
+        ([f64::from(vb.min.x), f64::from(vb.min.y)], f64::from(vb.width()), f64::from(vb.height())),
+        f64::from(w),
+        f64::from(h),
+        par,
+    )
+    .as_coeffs();
+    let m = Affine { m: [c[0] as f32, c[1] as f32, c[2] as f32, c[3] as f32, c[4] as f32, c[5] as f32] };
+    if m.is_finite() { m } else { Affine::IDENTITY }
 }
 
 /// An SVG transform list.
 fn transform(s: &str) -> Affine {
-    let mut m = Affine::IDENTITY;
-    let mut rest = s;
-    while let Some(open) = rest.find('(') {
-        let name = rest.get(..open).unwrap_or("").trim().trim_start_matches(',').trim();
-        let Some(close) = rest.get(open..).and_then(|r| r.find(')')).map(|c| c + open) else { break };
-        let a = numbers(rest.get(open + 1..close).unwrap_or(""));
-        let g = |i: usize| a.get(i).copied();
-        let t = match (name, a.len()) {
-            ("matrix", 6..) => Affine { m: [a[0], a[1], a[2], a[3], a[4], a[5]] },
-            ("translate", 1..) => Affine::translate(a[0], g(1).unwrap_or(0.0)),
-            ("scale", 1..) => Affine::scale(a[0], g(1).unwrap_or(a[0])),
-            ("rotate", 1..) => {
-                let r = Affine::rotate(a[0].to_radians());
-                match (g(1), g(2)) {
-                    (Some(cx), Some(cy)) => Affine::translate(cx, cy).mul(&r).mul(&Affine::translate(-cx, -cy)),
-                    _ => r,
-                }
-            }
-            ("skewX", 1..) => Affine { m: [1.0, 0.0, a[0].to_radians().tan(), 1.0, 0.0, 0.0] },
-            ("skewY", 1..) => Affine { m: [1.0, a[0].to_radians().tan(), 0.0, 1.0, 0.0, 0.0] },
-            _ => Affine::IDENTITY,
-        };
-        m = m.mul(&t);
-        rest = rest.get(close + 1..).unwrap_or("");
-    }
+    let c = craft_svg::transform_compat::parse_transform(s).as_coeffs();
+    let m = Affine { m: [c[0] as f32, c[1] as f32, c[2] as f32, c[3] as f32, c[4] as f32, c[5] as f32] };
     if m.is_finite() { m } else { Affine::IDENTITY }
 }
 
-fn named(name: &str) -> Option<u32> {
-    Some(match name {
-        "black" => 0x000000,
-        "white" => 0xffffff,
-        "red" => 0xff0000,
-        "lime" => 0x00ff00,
-        "green" => 0x008000,
-        "blue" => 0x0000ff,
-        "yellow" => 0xffff00,
-        "cyan" | "aqua" => 0x00ffff,
-        "magenta" | "fuchsia" => 0xff00ff,
-        "gray" | "grey" => 0x808080,
-        "silver" => 0xc0c0c0,
-        "maroon" => 0x800000,
-        "olive" => 0x808000,
-        "purple" => 0x800080,
-        "teal" => 0x008080,
-        "navy" => 0x000080,
-        "orange" => 0xffa500,
-        "pink" => 0xffc0cb,
-        "brown" => 0xa52a2a,
-        "gold" => 0xffd700,
-        "indigo" => 0x4b0082,
-        "violet" => 0xee82ee,
-        "coral" => 0xff7f50,
-        "salmon" => 0xfa8072,
-        "tomato" => 0xff6347,
-        "crimson" => 0xdc143c,
-        "khaki" => 0xf0e68c,
-        "beige" => 0xf5f5dc,
-        "ivory" => 0xfffff0,
-        "tan" => 0xd2b48c,
-        "chocolate" => 0xd2691e,
-        "sienna" => 0xa0522d,
-        "turquoise" => 0x40e0d0,
-        "skyblue" => 0x87ceeb,
-        "steelblue" => 0x4682b4,
-        "royalblue" => 0x4169e1,
-        "darkblue" => 0x00008b,
-        "lightblue" => 0xadd8e6,
-        "darkgreen" => 0x006400,
-        "lightgreen" => 0x90ee90,
-        "forestgreen" => 0x228b22,
-        "darkred" => 0x8b0000,
-        "darkgray" | "darkgrey" => 0xa9a9a9,
-        "lightgray" | "lightgrey" => 0xd3d3d3,
-        "dimgray" | "dimgrey" => 0x696969,
-        "darkorange" => 0xff8c00,
-        "orchid" => 0xda70d6,
-        "plum" => 0xdda0dd,
-        "lavender" => 0xe6e6fa,
-        "slategray" | "slategrey" => 0x708090,
-        "whitesmoke" => 0xf5f5f5,
-        "gainsboro" => 0xdcdcdc,
-        _ => return None,
-    })
-}
-
-/// A CSS colour (`#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`, `rgba()`, a name).
+/// A CSS colour (`#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`/`hsl()`, a name).
+/// `transparent` stays here: the shared parser treats it as an error so callers that
+/// need an opaque colour are not surprised.
 fn color(v: &str) -> Option<Rgba> {
     let v = v.trim();
-    let lower = v.to_ascii_lowercase();
-    if let Some(h) = lower.strip_prefix('#') {
-        let expand = |s: &str| s.chars().flat_map(|c| [c, c]).collect::<String>();
-        return match h.len() {
-            3 | 4 => Rgba::parse_hex(&expand(h)),
-            6 | 8 => Rgba::parse_hex(h),
-            _ => None,
-        };
-    }
-    if let Some(args) = lower.strip_prefix("rgba(").or_else(|| lower.strip_prefix("rgb(")) {
-        let args = args.trim_end_matches(')');
-        let parts: Vec<&str> = args.split([',', ' ', '/']).filter(|p| !p.is_empty()).collect();
-        let chan = |p: &str| -> Option<f32> {
-            match p.strip_suffix('%') {
-                Some(pc) => pc.parse::<f32>().ok().map(|x| x / 100.0),
-                None => p.parse::<f32>().ok().map(|x| x / 255.0),
-            }
-            .filter(|x| x.is_finite())
-            .map(|x| x.clamp(0.0, 1.0))
-        };
-        let alpha = |p: &str| -> Option<f32> {
-            match p.strip_suffix('%') {
-                Some(pc) => pc.parse::<f32>().ok().map(|x| x / 100.0),
-                None => p.parse::<f32>().ok(),
-            }
-            .filter(|x| x.is_finite())
-            .map(|x| x.clamp(0.0, 1.0))
-        };
-        let (r, g, b) = (chan(parts.first()?)?, chan(parts.get(1)?)?, chan(parts.get(2)?)?);
-        let a = parts.get(3).map_or(Some(1.0), |p| alpha(p))?;
-        return Some(Rgba::new(r, g, b, a));
-    }
-    if lower == "transparent" {
+    if v.eq_ignore_ascii_case("transparent") {
         return Some(Rgba::TRANSPARENT);
     }
-    named(&lower).map(Rgba::hex)
+    if let Some(rgba) = rgba_from_shared(v) {
+        return Some(rgba);
+    }
+    // CSS clips out-of-range rgb()/rgba() channels; the shared parser rejects them. Clip
+    // and try once more so `fill="rgb(300,0,0)"` still becomes red, as it did before the pin.
+    rgba_from_shared(&clipped_rgb(v)?)
+}
+
+fn rgba_from_shared(v: &str) -> Option<Rgba> {
+    let (c, a) = craft_svg::color::parse_color_alpha(v).ok()?;
+    Some(Rgba::new(f32::from(c.r) / 255.0, f32::from(c.g) / 255.0, f32::from(c.b) / 255.0, a))
+}
+
+/// `rgb()`/`rgba()` with each channel clipped to its range (0–255, or 0%–100%). Other
+/// colour forms are left alone so the shared parser's errors still stand.
+///
+/// At most four components are collected, so a 60 MiB `rgb(0,0,0,0,0,…)` does not
+/// allocate millions of slices before being rejected. Number-form channels are
+/// emitted as integers: the shared parser rejects a decimal such as `127.5`.
+fn clipped_rgb(v: &str) -> Option<String> {
+    let lower = v.trim().to_ascii_lowercase();
+    let (name, rest) = lower.split_once('(')?;
+    if name != "rgb" && name != "rgba" {
+        return None;
+    }
+    let body = rest.trim().strip_suffix(')')?;
+    let mut parts: Vec<&str> = Vec::with_capacity(4);
+    if body.contains(',') {
+        for p in body.split(',') {
+            if parts.len() >= 4 {
+                return None;
+            }
+            parts.push(p.trim());
+        }
+    } else {
+        let (channels, alpha) = match body.split_once('/') {
+            Some((channels, alpha)) => (channels, Some(alpha.trim())),
+            None => (body, None),
+        };
+        for p in channels.split_whitespace() {
+            if parts.len() >= 4 {
+                return None;
+            }
+            parts.push(p);
+        }
+        if let Some(alpha) = alpha {
+            if parts.len() >= 4 {
+                return None;
+            }
+            parts.push(alpha);
+        }
+    }
+    if parts.len() != 3 && parts.len() != 4 {
+        return None;
+    }
+    let clip_rgb = |p: &str| -> Option<String> {
+        if let Some(pc) = p.strip_suffix('%') {
+            let n: f32 = pc.parse().ok().filter(|x: &f32| x.is_finite())?;
+            return Some(format!("{}%", n.clamp(0.0, 100.0)));
+        }
+        let n: f32 = p.parse().ok().filter(|x: &f32| x.is_finite())?;
+        // The shared parser rejects non-percentage decimals; CSS 8-bit channels are integers.
+        Some(format!("{}", n.clamp(0.0, 255.0).round() as u8))
+    };
+    let clip_alpha = |p: &str| -> Option<String> {
+        if let Some(pc) = p.strip_suffix('%') {
+            let n: f32 = pc.parse().ok().filter(|x: &f32| x.is_finite())?;
+            return Some(format!("{}%", n.clamp(0.0, 100.0)));
+        }
+        let n: f32 = p.parse().ok().filter(|x: &f32| x.is_finite())?;
+        Some(format!("{}", n.clamp(0.0, 1.0)))
+    };
+    let r = clip_rgb(parts[0])?;
+    let g = clip_rgb(parts[1])?;
+    let b = clip_rgb(parts[2])?;
+    if let Some(a) = parts.get(3) { Some(format!("rgb({r}, {g}, {b}, {})", clip_alpha(a)?)) } else { Some(format!("rgb({r}, {g}, {b})")) }
 }
 
 // ----- style ------------------------------------------------------------------------------------
@@ -554,12 +541,9 @@ fn declarations(el: &X) -> Vec<(String, String)> {
     ];
     let mut out: Vec<(String, String)> = KEYS.iter().filter_map(|k| el.attr(k).map(|v| (k.to_string(), v.trim().to_string()))).collect();
     if let Some(style) = el.attr("style") {
-        for decl in style.split(';') {
-            if let Some((k, v)) = decl.split_once(':') {
-                let v = v.trim().trim_end_matches("!important").trim();
-                out.retain(|(key, _)| key != k.trim());
-                out.push((k.trim().to_ascii_lowercase(), v.to_string()));
-            }
+        for (k, v) in craft_svg::simple_css::declarations(style) {
+            out.retain(|(key, _)| key != &k);
+            out.push((k, v));
         }
     }
     out
@@ -568,18 +552,7 @@ fn declarations(el: &X) -> Vec<(String, String)> {
 /// A `stroke-dasharray`: lengths separated by commas or spaces. `none`, an empty list, a
 /// negative or unreadable length all draw solid (SVG renders an invalid array as none).
 fn dash_array(v: &str) -> Option<Vec<f32>> {
-    if v.trim() == "none" {
-        return None;
-    }
-    let mut out = Vec::new();
-    for part in v.split(|c: char| c == ',' || c.is_whitespace()).filter(|p| !p.trim().is_empty()).take(1024) {
-        let x = length(part, 100.0)?;
-        if x < 0.0 {
-            return None;
-        }
-        out.push(x);
-    }
-    (!out.is_empty()).then_some(out)
+    craft_svg::doc_style::parse_dash_array(v, 100.0).map(|xs| xs.into_iter().map(|x| x as f32).collect())
 }
 
 fn get<'a>(d: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -587,32 +560,12 @@ fn get<'a>(d: &'a [(String, String)], key: &str) -> Option<&'a str> {
 }
 
 fn opacity(v: &str) -> Option<f32> {
-    let v = v.trim();
-    let x = match v.strip_suffix('%') {
-        Some(p) => p.parse::<f32>().ok()? / 100.0,
-        None => v.parse::<f32>().ok()?,
-    };
-    x.is_finite().then(|| x.clamp(0.0, 1.0))
+    craft_svg::doc_style::parse_opacity(v).map(|x| x as f32)
 }
 
 /// A `font-size`: a keyword, a length, or relative to the parent's size (`em`, `ex`, `%`).
 fn font_size(v: &str, parent: f32) -> Option<f32> {
-    let v = v.trim();
-    let keyword = match v {
-        "xx-small" => Some(9.0),
-        "x-small" => Some(10.0),
-        "small" => Some(13.0),
-        "medium" => Some(16.0),
-        "large" => Some(18.0),
-        "x-large" => Some(24.0),
-        "xx-large" => Some(32.0),
-        "larger" => Some(parent * 1.2),
-        "smaller" => Some(parent / 1.2),
-        _ => None,
-    };
-    let rel = |suffix: &str, k: f32| v.strip_suffix(suffix).and_then(|n| n.trim().parse::<f32>().ok()).map(|n| n * k);
-    let size = keyword.or_else(|| rel("em", parent)).or_else(|| rel("ex", parent * 0.5)).or_else(|| rel("%", parent / 100.0)).or_else(|| length(v, parent))?;
-    size.is_finite().then(|| size.clamp(0.0, 2000.0))
+    craft_svg::doc_style::parse_font_size(v, f64::from(parent), f64::from(parent)).map(|x| x as f32)
 }
 
 impl Style {
@@ -769,7 +722,8 @@ impl<'a> Builder<'a> {
         let name = local(&el.name);
         // Containers that never draw by themselves.
         match name {
-            "defs" | "linearGradient" | "radialGradient" | "stop" | "symbol" | "metadata" | "title" | "desc" | "clipPath" | "mask" | "marker" | "pattern" | "filter" | "script" => return,
+            "defs" | "linearGradient" | "radialGradient" | "stop" | "symbol" | "metadata" | "title" | "desc" | "clipPath" | "mask" | "marker"
+            | "pattern" | "filter" | "script" => return,
             anicraft_xml::TEXT_NODE => return,
             "style" => {
                 self.report.skip("style sheets (inline styles are read)");
@@ -855,7 +809,10 @@ impl<'a> Builder<'a> {
                     return;
                 }
                 let shape = Shape { path: Arc::new(path), fill, stroke, fill_rule: style.fill_rule, merge: false, warp: None };
-                self.items.push(Item { el: ImportedElement { name: name_of(el), transform: *m, alpha, kind: ElementKind::Shape(shape) }, clips: Vec::new() });
+                self.items.push(Item {
+                    el: ImportedElement { name: name_of(el), transform: *m, alpha, kind: ElementKind::Shape(shape) },
+                    clips: Vec::new(),
+                });
             }
         }
     }
@@ -913,7 +870,11 @@ impl<'a> Builder<'a> {
                 let mut p = Path::new();
                 for (i, &[x, y]) in n.as_chunks::<2>().0.iter().enumerate() {
                     let q = Vec2::new(x, y);
-                    if i == 0 { p.move_to(q) } else { p.line_to(q) };
+                    if i == 0 {
+                        p.move_to(q)
+                    } else {
+                        p.line_to(q)
+                    };
                 }
                 if name == "polygon" && !p.is_empty() {
                     p.close();
@@ -939,7 +900,12 @@ impl<'a> Builder<'a> {
             }
         };
         let dash = style.dash.as_ref().and_then(|l| Dash::Dashed { lengths: l.iter().copied().collect(), offset: style.dash_offset }.sanitized());
-        Some(Stroke::new(color, style.stroke_width).with_style(StrokeStyle { cap: style.cap, join: style.join, miter_limit: style.miter_limit, dash }))
+        Some(Stroke::new(color, style.stroke_width).with_style(StrokeStyle {
+            cap: style.cap,
+            join: style.join,
+            miter_limit: style.miter_limit,
+            dash,
+        }))
     }
 
     /// A fill or stroke paint, with `opacity` folded in; `None` draws nothing.
@@ -996,16 +962,33 @@ impl<'a> Builder<'a> {
         let user = attr("gradientUnits") == Some("userSpaceOnUse");
         let (vw, vh) = self.viewport;
         // Gradient space → the shape's local space.
-        let units = if user { Affine::IDENTITY } else { Affine::translate(bounds.min.x, bounds.min.y).mul(&Affine::scale(bounds.width().max(1e-6), bounds.height().max(1e-6))) };
+        let units = if user {
+            Affine::IDENTITY
+        } else {
+            Affine::translate(bounds.min.x, bounds.min.y).mul(&Affine::scale(bounds.width().max(1e-6), bounds.height().max(1e-6)))
+        };
         let g = units.mul(&attr("gradientTransform").map_or(Affine::IDENTITY, transform));
         if !g.is_finite() {
             return None;
         }
         let coord = |key: &str, default: f32, reference: f32| -> f32 {
             match attr(key) {
-                Some(v) if !user => v.trim().strip_suffix('%').and_then(|p| p.parse::<f32>().ok()).map(|p| p / 100.0).or_else(|| v.trim().parse().ok()).filter(|x: &f32| x.is_finite()).unwrap_or(default),
+                Some(v) if !user => v
+                    .trim()
+                    .strip_suffix('%')
+                    .and_then(|p| p.parse::<f32>().ok())
+                    .map(|p| p / 100.0)
+                    .or_else(|| v.trim().parse().ok())
+                    .filter(|x: &f32| x.is_finite())
+                    .unwrap_or(default),
                 Some(v) => length(v, reference).unwrap_or(default),
-                None => if user { default * reference } else { default },
+                None => {
+                    if user {
+                        default * reference
+                    } else {
+                        default
+                    }
+                }
             }
         };
         // What shows past the ends and how the stops mix carry over (ADR 0074).
