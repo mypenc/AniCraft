@@ -272,6 +272,8 @@ fn busy(app: &App) -> Option<&'static str> {
 /// Finishes what is in progress on the shown document, before it is put aside or closed: text
 /// being typed and a pen path are kept, playback stops, an open drag ends its undo step.
 fn settle(app: &mut App) {
+    // Brush strokes on their way into this document (ADR 0129).
+    crate::ink::flush(app);
     if app.playing {
         app.toggle_play();
     }

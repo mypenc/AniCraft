@@ -1938,6 +1938,68 @@ fn create_shape_tween_morphs_and_keeps_the_easing() {
     assert_eq!(s.active_layer().unwrap().keyframes[0].tween.clone().unwrap().kind, anicraft_doc::TweenKind::Classic);
 }
 
+/// The flattened outlines of `items` (stage space), as line segments.
+fn outline_segments<'a>(items: impl Iterator<Item = &'a anicraft_doc::DisplayItem>) -> Vec<(Vec2, Vec2)> {
+    let mut segs = Vec::new();
+    for it in items {
+        for pl in it.path.flatten(&it.transform, 0.05) {
+            segs.extend(pl.points.windows(2).map(|w| (w[0], w[1])));
+            if let (true, Some(&a), Some(&b)) = (pl.closed, pl.points.last(), pl.points.first()) {
+                segs.push((a, b));
+            }
+        }
+    }
+    segs
+}
+
+/// How far `p` is from the nearest of `segs`.
+fn distance_to(segs: &[(Vec2, Vec2)], p: Vec2) -> f32 {
+    segs.iter()
+        .map(|&(a, b)| {
+            let ab = b - a;
+            let t = if ab.dot(ab) > 0.0 { ((p - a).dot(ab) / ab.dot(ab)).clamp(0.0, 1.0) } else { 0.0 };
+            p.distance(a + ab * t)
+        })
+        .fold(f32::INFINITY, f32::min)
+}
+
+#[test]
+fn shape_tweens_carry_the_stroke_round_shapes_with_more_or_fewer_sides() {
+    // Issue #119. A stroked triangle into a stroked hexagon and back (raw shapes: Merge Drawing
+    // makes one stroke piece per side, 3 and 6 of them). In between, the stroke must follow the
+    // whole morphing fill outline: no side left bare, no line left standing off it.
+    let mut s = Session::default();
+    let polygon = |s: &mut Session, sides: u32| {
+        let inner = 60.0 * (std::f32::consts::PI / sides as f32).cos(); // on the edges: a polygon
+        run(s, "draw.star", json!({"cx": 100, "cy": 100, "outer": 60, "inner": inner, "points": sides, "fill": "#ff0000", "stroke": "#000000", "stroke_width": 2, "object": false}));
+    };
+    polygon(&mut s, 3);
+    let strokes = |s: &Session| s.active_layer().unwrap().keyframes.last().unwrap().elements.iter().filter(|e| matches!(&e.kind, ElementKind::Shape(sh) if sh.fill.is_none())).count();
+    assert_eq!(strokes(&s), 3, "one stroke piece per side");
+    run(&mut s, "timeline.goto", json!({"frame": 10}));
+    run(&mut s, "timeline.insert_blank_keyframe", json!({}));
+    polygon(&mut s, 6);
+    assert_eq!(strokes(&s), 6);
+    run(&mut s, "timeline.goto", json!({"frame": 20}));
+    run(&mut s, "timeline.insert_blank_keyframe", json!({}));
+    polygon(&mut s, 3);
+    for frame in [0, 10] {
+        run(&mut s, "timeline.create_shape_tween", json!({"frame": frame}));
+    }
+    for frame in [3, 5, 8, 13, 15, 18] {
+        let list = anicraft_doc::evaluate(&s.doc, frame);
+        let fill = outline_segments(list.items.iter().filter(|i| i.fill.is_some()));
+        let stroke = outline_segments(list.items.iter().filter(|i| i.stroke.is_some()));
+        assert!(!fill.is_empty() && !stroke.is_empty(), "frame {frame}");
+        // Every point of the fill's outline has the stroke on it, and every point of the stroke
+        // lies on the outline.
+        let bare = fill.iter().flat_map(|&(a, b)| (0..=8).map(move |k| a.lerp(b, k as f32 / 8.0))).map(|p| distance_to(&stroke, p)).fold(0.0, f32::max);
+        let stray = stroke.iter().flat_map(|&(a, b)| (0..=8).map(move |k| a.lerp(b, k as f32 / 8.0))).map(|p| distance_to(&fill, p)).fold(0.0, f32::max);
+        assert!(bare < 0.5, "frame {frame}: part of the outline is {bare} from the stroke");
+        assert!(stray < 0.5, "frame {frame}: a stroke is {stray} off the outline");
+    }
+}
+
 #[test]
 fn scenes_play_in_order_edit_separately_and_survive_save_and_undo() {
     let mut s = Session::default();
@@ -2763,5 +2825,73 @@ fn a_motion_guide_with_sharp_corners_is_followed_to_its_end() {
         let p = at(&s, f);
         assert!(p.distance(prev) > 10.0, "it stopped at frame {f}: {prev:?} → {p:?}");
         prev = p;
+    }
+}
+
+/// ADR 0128: a frame cut short by its allowance of work is still written, and every command
+/// that writes it says so; a whole frame's results are as they always were. (The symbols hold
+/// thousands of empty layers, so the allowance goes on looking at them and little is drawn.)
+#[test]
+fn exports_of_a_frame_too_large_to_draw_say_artwork_was_left_out() {
+    let dir = std::env::temp_dir().join(format!("anicraft-left-out-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut large = anicraft_doc::sample::doubling(31);
+    for sym in &mut large.library {
+        let tl = &mut std::sync::Arc::make_mut(sym).timeline;
+        for i in 0..5_000 {
+            tl.layers.push(std::sync::Arc::new(anicraft_doc::Layer::new(anicraft_doc::LayerId(9_000 + i), "empty")));
+        }
+    }
+    for (doc, cut) in [(large, true), (anicraft_doc::sample::doubling(6), false)] {
+        let mut s = Session::new(doc);
+        let at = |name: &str| dir.join(format!("{cut}-{name}")).display().to_string();
+        let results = [
+            s.info(),
+            run(&mut s, "file.export_png", json!({"path": at("f.png"), "scale": 0.1})),
+            run(&mut s, "file.export_svg", json!({"path": at("f.svg")})),
+            run(&mut s, "file.export_png_sequence", json!({"dir": at("png"), "scale": 0.1})),
+            run(&mut s, "file.export_svg_sequence", json!({"dir": at("svg")})),
+            run(&mut s, "file.export_sprite_sheet", json!({"path": at("sheet.png"), "scale": 0.1})),
+            run(&mut s, "file.export_gif", json!({"path": at("f.gif"), "scale": 0.1})),
+            run(&mut s, "file.export_apng", json!({"path": at("a.png"), "scale": 0.1})),
+        ];
+        for v in &results {
+            assert_eq!(v.get("left_out").and_then(Value::as_bool).unwrap_or(false), cut, "{v}");
+            assert_eq!(v.get("warning").is_some(), cut, "{v}");
+        }
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// P-011: two raw fills side by side, their outlines joined along the edge they share, on a
+/// shape tween that follows a motion guide. A guide places every element by its own origin, so
+/// the stroke runs used to leave the fills and cross them. Each run rides with the fill it
+/// edges, the same number of runs on both keys or not; the shared edge goes with the lower fill.
+#[test]
+fn guided_shape_tweens_keep_each_raw_outline_on_its_fill() {
+    let mut s = Session::default();
+    for (x, fill) in [(100, "#e63946"), (180, "#457b9d")] {
+        run(&mut s, "draw.rect", json!({"x": x, "y": 240, "w": 80, "h": 80, "fill": fill, "stroke": "#000000", "stroke_width": 4, "object": false}));
+    }
+    let art = s.active_layer().unwrap().id;
+    run(&mut s, "timeline.goto", json!({"frame": 20}));
+    run(&mut s, "timeline.insert_keyframe", json!({}));
+    run(&mut s, "edit.select_all", json!({}));
+    run(&mut s, "element.translate", json!({"dx": 440, "dy": 0}));
+    run(&mut s, "timeline.goto", json!({"frame": 0}));
+    run(&mut s, "timeline.create_shape_tween", json!({}));
+    run(&mut s, "layer.add_motion_guide", json!({"layer": art.0}));
+    for (a, b) in [((140, 280), (400, 80)), ((400, 80), (660, 280))] {
+        run(&mut s, "draw.line", json!({"x0": a.0, "y0": a.1, "x1": b.0, "y1": b.1, "object": false}));
+    }
+    let length = |segs: &[(Vec2, Vec2)]| segs.iter().map(|(a, b)| a.distance(*b)).sum::<f32>();
+    let on_art = |list: &anicraft_doc::DisplayList| (outline_segments(list.items.iter().filter(|i| i.layer == art && i.fill.is_some())), outline_segments(list.items.iter().filter(|i| i.layer == art && i.stroke.is_some())));
+    let drawn = length(&on_art(&anicraft_doc::evaluate_scene(&s.doc, s.scene, 0)).1);
+    assert!(drawn > 500.0, "seven sides of 80: {drawn}");
+    for frame in [3, 5, 10, 15, 18] {
+        let (fill, stroke) = on_art(&anicraft_doc::evaluate_scene(&s.doc, s.scene, frame));
+        let stray = stroke.iter().flat_map(|&(a, b)| (0..=8).map(move |k| a.lerp(b, k as f32 / 8.0))).map(|p| distance_to(&fill, p)).fold(0.0, f32::max);
+        assert!(stray < 0.5, "frame {frame}: a stroke is {stray} off the fills' outlines");
+        assert!((length(&stroke) - drawn).abs() < 1.0, "frame {frame}: every run is still drawn: {} of {drawn}", length(&stroke));
     }
 }

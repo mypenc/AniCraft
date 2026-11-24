@@ -97,10 +97,20 @@ impl Rgba {
         let c = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
         Rgba::new(c(self.r), c(self.g), c(self.b), c(self.a))
     }
+    /// Always the opaque `#rrggbb`, alpha left out: what the SVG, HTML and Lottie writers and
+    /// the layer colours put where six digits are expected (they carry opacity themselves).
+    /// [`Rgba::to_hex_alpha`] is the form that reads back as the same colour.
     pub fn to_hex(self) -> String {
         let s = self.sanitized();
         let b = |v: f32| (v * 255.0).round() as u8;
         format!("#{:02x}{:02x}{:02x}", b(s.r), b(s.g), b(s.b))
+    }
+    /// `#rrggbb`, or `#rrggbbaa` when not opaque: [`Rgba::parse_hex`] reads it back as the
+    /// same colour, to the 8 bits a channel is written in.
+    pub fn to_hex_alpha(self) -> String {
+        let s = self.sanitized();
+        let a = (s.a * 255.0).round() as u8;
+        if a == u8::MAX { s.to_hex() } else { format!("{}{a:02x}", s.to_hex()) }
     }
     /// Parses `#rrggbb`, `rrggbb` or `#rrggbbaa`.
     pub fn parse_hex(s: &str) -> Option<Rgba> {
@@ -1106,18 +1116,18 @@ impl Element {
     }
     /// Local-space bounds (control-point bounds for shapes, `None` for symbols).
     pub fn local_bounds(&self, doc: &Document) -> Rect {
-        element_bounds(doc, self, &Affine::IDENTITY, 0, &std::cell::Cell::new(MAX_EVAL_ELEMENTS))
+        element_bounds(doc, self, &Affine::IDENTITY, 0, &eval::Work::new(MAX_EVAL_ELEMENTS))
     }
     /// Bounds in the parent's space.
     pub fn bounds(&self, doc: &Document) -> Rect {
-        element_bounds(doc, self, &self.transform, 0, &std::cell::Cell::new(MAX_EVAL_ELEMENTS))
+        element_bounds(doc, self, &self.transform, 0, &eval::Work::new(MAX_EVAL_ELEMENTS))
     }
 }
 
-/// `work` is the query's allowance of element visits ([`MAX_EVAL_ELEMENTS`]): past it the rest
-/// adds nothing, as in evaluation.
-fn element_bounds(doc: &Document, el: &Element, xf: &Affine, depth: usize, work: &std::cell::Cell<u32>) -> Rect {
-    if depth > MAX_SYMBOL_DEPTH || !eval::spend(work) {
+/// `work` is the query's allowance ([`MAX_EVAL_ELEMENTS`]): past it the rest adds nothing, as in
+/// evaluation. A shape pays for the outline measured here, and a symbol for each of its layers.
+fn element_bounds(doc: &Document, el: &Element, xf: &Affine, depth: usize, work: &eval::Work) -> Rect {
+    if depth > MAX_SYMBOL_DEPTH || !work.visit(el) {
         return Rect::EMPTY;
     }
     match &el.kind {
@@ -1135,9 +1145,12 @@ fn element_bounds(doc: &Document, el: &Element, xf: &Affine, depth: usize, work:
             r
         }
         ElementKind::Symbol { symbol, .. } => {
-            let Some(sym) = doc.symbol(*symbol) else { return Rect::EMPTY };
+            let Some(sym) = work.symbol(doc, *symbol) else { return Rect::EMPTY };
             let mut r = Rect::EMPTY;
             for layer in &sym.timeline.layers {
+                if !work.spend(1) {
+                    return r;
+                }
                 if let Some(kf) = layer.keyframes.first() {
                     for child in &kf.elements {
                         let m = xf.mul(&child.transform);
@@ -2519,6 +2532,17 @@ mod tests {
         assert_eq!(LoopMode::PlayOnce.local_frame(7, 0, 5), 4);
         assert_eq!(LoopMode::SingleFrame.local_frame(7, 3, 5), 3);
         assert_eq!(LoopMode::Loop.local_frame(u32::MAX, u32::MAX, 0), 0);
+    }
+
+    #[test]
+    fn hex_roundtrip_keeps_alpha() {
+        let c = Rgba::parse_hex("#ff000080").unwrap();
+        assert_eq!(c.to_hex_alpha(), "#ff000080");
+        assert_eq!(Rgba::parse_hex(&c.to_hex_alpha()).unwrap(), c);
+        // Six digits where six are expected, whatever the alpha: the exporters' contract.
+        assert_eq!(c.to_hex(), "#ff0000");
+        // An alpha that rounds to opaque is written as opaque, so both forms agree.
+        assert_eq!(Rgba::new(1.0, 0.0, 0.0, 0.999).to_hex_alpha(), "#ff0000");
     }
 
     #[test]

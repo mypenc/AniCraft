@@ -99,7 +99,7 @@ not this table, says what matters most.
 |---|---|---|
 | Selection | **partial** | Raw shapes, objects, marquee, bend an edge, move a corner ([ADR 0041](adr/0041-selection-tool-on-raw-drawings.md), [ADR 0044](adr/0044-selection-across-layers.md)). Missing: a marquee that takes instances and objects it only touches ([#522](https://github.com/storytold/anicraft/issues/522)), Hide Edges ([#298](https://github.com/storytold/anicraft/issues/298)) (P-017). |
 | Subselection | **done** | [ADR 0042](adr/0042-subselection-and-merging-everywhere.md), [ADR 0045](adr/0045-raw-points-and-raw-shapes-inside-symbols.md). |
-| Free Transform | **partial** | Scale, skew, rotate, the transformation point, a box that turns with the object ([ADR 0111](adr/0111-the-transformation-point-a-turning-box-and-layer-opacity.md)), Envelope ([ADR 0080](adr/0080-drawing-parity-leftovers.md)). Missing: Distort. Open bugs: rotation on Windows and FreeBSD ([#479](https://github.com/storytold/anicraft/issues/479)), handles on a skewed symbol ([#117](https://github.com/storytold/anicraft/issues/117)) (P-005). |
+| Free Transform | **partial** | Scale, skew, rotate, the transformation point, a box that turns with the object ([ADR 0111](adr/0111-the-transformation-point-a-turning-box-and-layer-opacity.md)), Envelope ([ADR 0080](adr/0080-drawing-parity-leftovers.md)). Missing: Distort. Open bug: rotation on Windows and FreeBSD ([#479](https://github.com/storytold/anicraft/issues/479)), not reproduced on Windows 10 (P-005). |
 | Gradient Transform | **done** | Gradient and bitmap fills, Lock Fill. |
 | Lasso | **missing** | P-018 ([#515](https://github.com/storytold/anicraft/issues/515)). |
 | Polygon (lasso) | **missing** | P-018. |
@@ -192,8 +192,8 @@ not this table, says what matters most.
 | Justified text | **missing** | Drawn left-aligned (P-033). |
 | Superscript, subscript, first-line indent, margins | **missing** | P-033. |
 | Vertical text | **missing** | P-033. |
-| Mixed directions (Hebrew or Arabic with Latin and numbers) | **partial** | Shaped per paragraph in one direction; outside PR [#39](https://github.com/storytold/anicraft/issues/39) fixes it (P-008). |
-| Letters the font lacks drawn from a fallback face | **partial** | Outside PR [#40](https://github.com/storytold/anicraft/issues/40) (P-008). |
+| Mixed directions (Hebrew or Arabic with Latin and numbers) | **partial** | Static text, text on a path and fields follow the Unicode bidi algorithm, in every export; in a field the arrow keys move the caret the way they point ([ADR 0130](adr/0130-mixed-directions-and-fallback-faces.md); [text](guide/text.md)). Missing: a direction setting for a paragraph with alignment to its start, and right-to-left text a script sets in the HTML page (P-033). |
+| Letters the font lacks drawn from a fallback face | **done** | From a list of system faces, then any installed face; the command says which family lent them ([ADR 0130](adr/0130-mixed-directions-and-fallback-faces.md)). |
 | Anti-alias modes and device fonts | **partial** | Text is stored as outlines, so it draws the same everywhere; there is no choice of anti-aliasing or of device fonts. |
 | Break Apart text into letters, then shapes | **done** | One step to shapes. |
 | Filters on text | **done** | [ADR 0099](adr/0099-filter-colour-and-stepped-tracks-built-in-presets-and-filters-on-text.md). |
@@ -276,7 +276,7 @@ not this table, says what matters most.
 | Motion presets: save a tween, apply it elsewhere | **missing** | P-041. |
 | Copy and paste motion; paste properties | **missing** | P-041. |
 | 3D properties in a motion tween | **missing** | With the 3D tools (P-044). |
-| Shape tweens | **done** | Open: strokes that should follow their fills (outside PR [#238](https://github.com/storytold/anicraft/issues/238), P-011). |
+| Shape tweens | **done** | A raw shape's outline morphs with its fill, whatever the number of sides, and rides a motion guide with the fill it edges (an edge two fills share goes with the lower one). |
 | Shape hints | **done** | [ADR 0023](adr/0023-shape-hints.md). [#82](https://github.com/storytold/anicraft/issues/82) can close. Missing: hints inside a symbol edited in place. |
 | Shape tween blend (distributive, angular) | **partial** | One blend; no choice?. |
 | Keep area while tweening | **ours** | [ADR 0115](adr/0115-pen-parity-and-keep-area-tweens.md). |
