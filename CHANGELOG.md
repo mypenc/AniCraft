@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+* **Timeline and panel bugs from the tracker** (M8, backlog P-009 and P-010, ADR 0131).
+  * **Several layers selected at once** (#512). **Ctrl**-click a layer's name to add it or take
+    it out, **Shift**-click for every layer from the active one, or **Shift+Up** and
+    **Shift+Down** on the focused timeline. Drag any one of them and they all move, landing
+    together in the order they had; the folder button puts them in a new folder; Delete Layer
+    takes them all and asks once. Each is one undo step. Headless: `add: toggle | range` on
+    `layer.select`, `layers: [ids]` on `layer.move` and `layer.delete`, `wrap` on
+    `layer.new_folder`, `layer_selection` in the session state.
+  * **A click on the frame ruler leaves no frames selected** (#195; jayzed80, outside PR #222),
+    also when the playhead stays inside the selection, so **F5** then adds frames on every
+    layer as in Animate. **F6** and **F7** stay on the layer you're on.
+  * **A new mask is locked**, as Animate leaves it (#429): the result shows without the mask's
+    edge in the layer colour. Unlock the mask layer to see the edge and reshape it.
+  * **The "1–9 of 16 layers" count no longer lies over the buttons** in the layer list's header
+    (#523; Mex, outside PR #535). In a column too narrow for it, the heading shows it on hover.
+  * **The Movie Explorer's list uses the whole height of its pane** (#513; Mex, outside PR
+    #532) instead of stopping at about ten rows.
+  * Tests now pin two reports that `main` no longer shows: a click on the fill or stroke square
+    under the tools opens its colour picker (#246), and the docks keep their size while the
+    pointer moves over them at every interface scale (#159, not reproduced; the issue stays
+    open for a retest).
 * **Text reads right: mixed directions, and letters from a fallback face** (M5, backlog P-008,
   ADR 0130). With outside pull requests #39 and #40 by SoldierPePe, whose commits are merged
   here and rebuilt on styled text.
